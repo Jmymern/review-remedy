@@ -2,7 +2,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
-// Make this route always dynamic + uncached on Vercel/Next
+// Always dynamic and uncached
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
@@ -13,6 +13,8 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 type RawRow = {
   id?: string;
   created_at?: string | null;
+
+  // current schema
   business_name?: string | null;
   business_url?: string | null;
   time_range?: string | null;
@@ -21,7 +23,8 @@ type RawRow = {
   suggestions?: string | null;
   status?: string | null;
   error?: string | null;
-  // legacy fields
+
+  // legacy fields we *might* see (don’t assume they exist)
   report_name?: string | null;
   top_positive?: string | null;
   top_complaint?: string | null;
@@ -45,25 +48,26 @@ function normalizeRows(rows: RawRow[]): Report[] {
     .map((r, idx) => {
       const id = String(r.id ?? `${r.created_at ?? "no-date"}-${idx}`);
 
+      // Prefer business_name; fall back to report_name if present
       const business_name =
         (r.business_name ?? r.report_name ?? "") || null;
 
       const positives =
-        Array.isArray(r?.positives) && r.positives.length > 0
+        Array.isArray(r.positives) && r.positives.length > 0
           ? r.positives.map(String)
-          : r?.top_positive
+          : r.top_positive
           ? [String(r.top_positive)]
           : [];
 
       const negatives =
-        Array.isArray(r?.negatives) && r.negatives.length > 0
+        Array.isArray(r.negatives) && r.negatives.length > 0
           ? r.negatives.map(String)
-          : r?.top_complaint
+          : r.top_complaint
           ? [String(r.top_complaint)]
           : [];
 
       const suggestions =
-        r?.suggestions != null ? String(r.suggestions) : null;
+        r.suggestions != null ? String(r.suggestions) : null;
 
       return {
         id,
@@ -78,7 +82,7 @@ function normalizeRows(rows: RawRow[]): Report[] {
         error: r.error ?? null,
       } as Report;
     })
-    // drop pure placeholders
+    // Drop pure placeholders
     .filter((r) => {
       const hasContent =
         (r.positives && r.positives.length > 0) ||
@@ -86,7 +90,7 @@ function normalizeRows(rows: RawRow[]): Report[] {
         (r.suggestions && r.suggestions.trim().length > 0);
       return Boolean(r.business_name) || hasContent;
     })
-    // newest first
+    // Newest first
     .sort((a, b) => {
       const da = a.created_at ? Date.parse(a.created_at) : 0;
       const db = b.created_at ? Date.parse(b.created_at) : 0;
@@ -96,11 +100,10 @@ function normalizeRows(rows: RawRow[]): Report[] {
 
 export async function GET() {
   try {
+    // Select whatever exists in your table (avoids missing-column errors)
     const { data, error } = await supabase
       .from("reports")
-      .select(
-        "id, created_at, business_name, business_url, time_range, positives, negatives, suggestions, status, error, report_name, top_positive, top_complaint"
-      )
+      .select("*")
       .order("created_at", { ascending: false });
 
     if (error) {
@@ -112,11 +115,9 @@ export async function GET() {
       return resp;
     }
 
-    const reports = normalizeRows(data || []);
+    const reports = normalizeRows((data as RawRow[]) || []);
 
-    // Return BOTH shapes so any old/new client code works:
-    // - `reports: [...]` (new)
-    // - `data: { reports: [...] }` (old)
+    // Return BOTH shapes for backward compatibility
     const resp = NextResponse.json(
       { reports, data: { reports }, error: null },
       { status: 200 }
