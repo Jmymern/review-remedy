@@ -7,36 +7,111 @@ type Report = {
   business_name: string | null;
   business_url: string | null;
   time_range: string | null;
-  positives?: string[] | null;
-  negatives?: string[] | null;
-  suggestions?: string | null;
-  created_at?: string | null;
-  status?: string | null;
-  error?: string | null;
+  positives: string[];       // normalized to array
+  negatives: string[];       // normalized to array
+  suggestions: string | null;
+  created_at: string | null;
+  status: string | null;
+  error: string | null;
 };
 
 export default function DashboardPage() {
+  // ---- form state
   const [gmapsUrl, setGmapsUrl] = useState('');
   const [bizName, setBizName] = useState('');
   const [timeRange, setTimeRange] = useState('90');
+
+  // ---- UI state
   const [loading, setLoading] = useState(false);
-  const [reports, setReports] = useState<Report[]>([]);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // ---- data
+  const [reports, setReports] = useState<Report[]>([]);
+
+  // ---------- helpers ----------
+  function looksLikeGmaps(url: string) {
+    const u = url.trim();
+    return (
+      u.includes('google.com/maps') ||
+      u.includes('maps.app.goo.gl')
+    );
+  }
+
+  function normalize(list: any[]): Report[] {
+    return (list || [])
+      .map((r: any, i: number) => {
+        const id =
+          String(r?.id ?? '') ||
+          `${r?.created_at ?? 'no-date'}-${i}`;
+
+        const business_name =
+          (r?.business_name ?? r?.report_name ?? '').toString() || null;
+
+        const positives: string[] =
+          Array.isArray(r?.positives)
+            ? r.positives.map(String)
+            : (r?.top_positive ? [String(r.top_positive)] : []);
+
+        const negatives: string[] =
+          Array.isArray(r?.negatives)
+            ? r.negatives.map(String)
+            : (r?.top_complaint ? [String(r.top_complaint)] : []);
+
+        const suggestions =
+          r?.suggestions != null ? String(r.suggestions) : null;
+
+        // filter out pure-empty placeholder rows later
+        return {
+          id,
+          business_name,
+          business_url: r?.business_url ?? null,
+          time_range: r?.time_range ?? null,
+          positives,
+          negatives,
+          suggestions,
+          created_at: r?.created_at ?? null,
+          status: r?.status ?? null,
+          error: r?.error ?? null,
+        } as Report;
+      })
+      .filter((r: Report) => {
+        // keep if it has a name OR any content
+        const hasContent =
+          (r.positives && r.positives.length > 0) ||
+          (r.negatives && r.negatives.length > 0) ||
+          (r.suggestions && r.suggestions.trim().length > 0);
+        return Boolean(r.business_name) || hasContent;
+      })
+      .sort((a, b) => {
+        // newest first by created_at (fallback to id)
+        const da = a.created_at ? Date.parse(a.created_at) : 0;
+        const db = b.created_at ? Date.parse(b.created_at) : 0;
+        return db - da;
+      });
+  }
 
   async function fetchReports() {
     setError(null);
     try {
-      // Accept both shapes: {data:{reports:[]}} OR {data:[]/reports:[]}
-      const res = await fetch('/api/dashboard-data', { cache: 'no-store' });
+      // force fresh data every time
+      const res = await fetch('/api/dashboard-data', {
+        cache: 'no-store',
+        headers: { 'x-no-cache': Date.now().toString() }, // extra cache buster
+      });
+      if (!res.ok) throw new Error(`Failed to load reports (${res.status})`);
       const json = await res.json();
-      const list =
-        json?.data?.reports ??
-        json?.data ??
-        json?.reports ??
-        [];
-      setReports(Array.isArray(list) ? list : []);
+
+      // Support any of these shapes:
+      // { data: { reports: [...] } } | { data: [...] } | { reports: [...] } | [...]
+      const raw =
+        Array.isArray(json) ? json
+        : json?.data?.reports ?? json?.data ?? json?.reports ?? [];
+
+      setReports(normalize(raw));
     } catch (e: any) {
       setError(e?.message || 'Failed to load reports');
+      setReports([]);
     }
   }
 
@@ -44,14 +119,7 @@ export default function DashboardPage() {
     fetchReports();
   }, []);
 
-  function looksLikeGmaps(url: string) {
-    // Allow maps.app.goo.gl and full google.com/maps links
-    return (
-      url.includes('google.com/maps') ||
-      url.includes('maps.app.goo.gl')
-    );
-  }
-
+  // ---------- actions ----------
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
@@ -74,16 +142,22 @@ export default function DashboardPage() {
       });
 
       if (!res.ok) {
-        const txt = await res.text();
-        throw new Error(txt || 'Failed to create report');
+        const txt = await res.text().catch(() => '');
+        throw new Error(txt || `Failed to create report (${res.status})`);
       }
 
-      // Clear the form and refresh the list
+      // clear the form
       setGmapsUrl('');
       setBizName('');
       setTimeRange('90');
 
+      // pull fresh data
       await fetchReports();
+      // focus scroll to list
+      setTimeout(() => {
+        const el = document.getElementById('reports-list');
+        el?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 50);
     } catch (err: any) {
       setError(err?.message || 'Something went wrong.');
     } finally {
@@ -91,8 +165,16 @@ export default function DashboardPage() {
     }
   }
 
+  async function onRefresh() {
+    setRefreshing(true);
+    await fetchReports();
+    setRefreshing(false);
+  }
+
+  // ---------- UI ----------
   return (
     <div className="mx-auto max-w-5xl p-6 space-y-8">
+      {/* Charter Badge */}
       <div className="rounded-xl border p-4 bg-white flex items-center justify-between">
         <div>
           <div className="text-sm uppercase tracking-wide text-gray-500">Beta Charter Member</div>
@@ -105,7 +187,7 @@ export default function DashboardPage() {
       <form onSubmit={onSubmit} className="rounded-2xl border p-6 bg-white space-y-4">
         <h2 className="text-xl font-semibold">Analyze Your Google Reviews</h2>
         <p className="text-sm text-gray-600">
-          Paste your Google Maps “Share” link. We’ll fetch reviews for the selected time range and generate a clear action plan.
+          Paste your Google Maps link (Share → Copy link). We’ll fetch reviews for the selected time range and build a clear action plan.
         </p>
 
         <div className="space-y-2">
@@ -113,11 +195,13 @@ export default function DashboardPage() {
           <input
             value={gmapsUrl}
             onChange={(e) => setGmapsUrl(e.target.value)}
-            placeholder="https://www.google.com/maps/place/Your-Business/… or https://maps.app.goo.gl/…"
+            placeholder="https://www.google.com/maps/place/... or https://maps.app.goo.gl/..."
             className="w-full rounded-lg border px-3 py-2"
             required
           />
-          <p className="text-xs text-gray-500">Tip: On Google Maps, open the business → Share → Copy link.</p>
+          <p className="text-xs text-gray-500">
+            Works with <code>/maps/place</code>, <code>/maps/dir</code>, and <code>maps.app.goo.gl</code> short links.
+          </p>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -126,7 +210,7 @@ export default function DashboardPage() {
             <input
               value={bizName}
               onChange={(e) => setBizName(e.target.value)}
-              placeholder="Jiffy Lube 2111 W Washington St S Broken Arrow OK 74012"
+              placeholder="Jiffy Lube 2111 W Washington St S, Broken Arrow, OK"
               className="w-full rounded-lg border px-3 py-2"
             />
           </div>
@@ -158,8 +242,18 @@ export default function DashboardPage() {
       </form>
 
       {/* Results */}
-      <div className="space-y-4">
-        <h3 className="text-lg font-semibold">Latest Reports</h3>
+      <div className="space-y-4" id="reports-list">
+        <div className="flex items-center justify-between">
+          <h3 className="text-lg font-semibold">Latest Reports</h3>
+          <button
+            onClick={onRefresh}
+            disabled={refreshing}
+            className="text-sm underline"
+          >
+            {refreshing ? 'Refreshing…' : 'Refresh reports'}
+          </button>
+        </div>
+
         {reports.length === 0 && (
           <div className="text-sm text-gray-500">No reports yet. Run your first analysis above.</div>
         )}
@@ -169,9 +263,13 @@ export default function DashboardPage() {
             <div key={r.id} className="rounded-xl border p-4 bg-white space-y-2">
               <div className="flex items-center justify-between">
                 <div className="font-semibold">{r.business_name || 'Unnamed business'}</div>
-                <div className="text-xs text-gray-500">{r.created_at?.slice(0, 10) || ''}</div>
+                <div className="text-xs text-gray-500">
+                  {r.created_at ? new Date(r.created_at).toISOString().slice(0, 10) : ''}
+                </div>
               </div>
-              <div className="text-sm text-gray-600 break-all">{r.business_url || ''}</div>
+              {r.business_url && (
+                <div className="text-sm text-gray-600 break-all">{r.business_url}</div>
+              )}
 
               <div className="grid md:grid-cols-3 gap-3 text-sm">
                 <div className="rounded-lg border p-3">
@@ -198,13 +296,6 @@ export default function DashboardPage() {
             </div>
           ))}
         </div>
-
-        <button
-          onClick={fetchReports}
-          className="text-sm underline"
-        >
-          Refresh reports
-        </button>
       </div>
     </div>
   );
