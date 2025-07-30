@@ -1,24 +1,35 @@
 'use client';
-import { useState, useEffect } from 'react';
-import { createClient } from '@supabase/supabase-js';
-import type { User } from '@supabase/supabase-js';
 
+import { useState, useEffect } from 'react';
+import { createClient, type User } from '@supabase/supabase-js';
+import Link from 'next/link';
+
+/**
+ * NOTE: This keeps your current client-side Supabase init exactly as-is.
+ * Once you're deployed and stable, move these keys into env vars
+ * and rotate them (the anon key is safe-ish but should not live in git).
+ */
 const supabase = createClient(
   'https://tyqpgfjbjrcqmrisxvln.supabase.co',
   'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR5cXBnZmpianJjcW1yaXN4dmxuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTIzNjU3NTMsImV4cCI6MjA2Nzk0MTc1M30.izgyrjqeooALMd705IW28WLkDN_pyMbpuOTFr1zuAbk'
 );
 
-import Link from 'next/link';
-
 export default function HomePage() {
-  const [loading, setLoading] = useState(false);
+  // ✅ Fix: tell TypeScript this can be a Supabase `User` OR null
   const [user, setUser] = useState<User | null>(null);
+  const [loading, setLoading] = useState(false);
 
-
+  // Safer getUser() usage with async/await
   useEffect(() => {
-    supabase.auth.getUser().then(({ data }) => {
-      setUser(data?.user || null);
-    });
+    let isMounted = true;
+    (async () => {
+      const { data, error } = await supabase.auth.getUser();
+      if (!isMounted) return;
+      setUser(error ? null : (data.user ?? null));
+    })();
+    return () => {
+      isMounted = false;
+    };
   }, []);
 
   const handleCheckout = async () => {
@@ -30,10 +41,7 @@ export default function HomePage() {
       }
 
       setLoading(true);
-      const res = await fetch('/api/create-checkout-session', {
-        method: 'POST',
-      });
-
+      const res = await fetch('/api/create-checkout-session', { method: 'POST' });
       const data = await res.json();
 
       if (data?.url) {
@@ -96,7 +104,10 @@ export default function HomePage() {
           Businesses that respond to reviews earn up to 20% more revenue<br />
           <em>(Sources: SuperAGI, SmallBusinessExpo, Zendesk 2024)</em>
         </p>
-        <blockquote className="text-gray-600 italic">“Within a week of using Review Remedy, I knew exactly why we were losing repeat customers. It’s like having a marketing coach in your pocket.”<br /><span className="not-italic font-semibold">– Early Beta User, Tulsa OK</span></blockquote>
+        <blockquote className="text-gray-600 italic">
+          “Within a week of using Review Remedy, I knew exactly why we were losing repeat customers. It’s like having a marketing coach in your pocket.”<br />
+          <span className="not-italic font-semibold">– Early Beta User, Tulsa OK</span>
+        </blockquote>
       </section>
 
       <section className="bg-black text-white py-12 px-6 text-center">
