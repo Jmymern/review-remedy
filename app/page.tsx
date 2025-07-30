@@ -1,6 +1,7 @@
 'use client';
 import { useState, useEffect } from 'react';
 import { createClient } from '@supabase/supabase-js';
+import type { User } from '@supabase/supabase-js';
 
 const supabase = createClient(
   'https://tyqpgfjbjrcqmrisxvln.supabase.co',
@@ -11,7 +12,8 @@ import Link from 'next/link';
 
 export default function HomePage() {
   const [loading, setLoading] = useState(false);
-  const [user, setUser] = useState(null);
+  const [user, setUser] = useState<User | null>(null);
+
 
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => {
