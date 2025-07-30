@@ -1,32 +1,37 @@
 'use client';
 
-import { loadStripe } from '@stripe/stripe-js';
-
-const stripePromise = loadStripe('pk_test_51Rk9leR0sArT9xLl8ZFtIiQ7zwYurluSL43pXZOriK5aooxj0wflAoYCNjzwcyxd32M1V15IcgfTZ9Dm9RE8djMB00ykifb4t6');
-
 export default function PricingPage() {
   const handleCheckout = async () => {
-    const res = await fetch('/api/create-checkout-session', {
-      method: 'POST',
-    });
+    try {
+      const res = await fetch('/api/create-checkout-session', {
+        method: 'POST',
+      });
 
-    const data = await res.json();
+      const data = await res.json();
 
-    if (data.id) {
-      const stripe = await stripePromise;
-      stripe?.redirectToCheckout({ sessionId: data.id });
-    } else {
-      alert('Something went wrong.');
+      if (data.url) {
+        window.location.href = data.url;
+      } else {
+        alert('Something went wrong. No checkout URL returned.');
+      }
+    } catch (err) {
+      console.error('Checkout Error:', err);
+      alert('Checkout failed. See console for details.');
     }
   };
 
   return (
-    <div>
-      <h1>Choose Your Plan</h1>
-      <div style={{ border: '1px solid gray', padding: '20px', maxWidth: '300px' }}>
-        <h2>Pro Plan</h2>
-        <p>$20 / month</p>
-        <button onClick={handleCheckout}>Buy Now</button>
+    <div className="min-h-screen flex flex-col items-center justify-center bg-white text-black px-4">
+      <h1 className="text-3xl font-bold mb-4">Choose Your Plan</h1>
+      <div className="border border-gray-300 rounded-lg p-6 shadow-md max-w-sm text-center">
+        <h2 className="text-xl font-semibold mb-2">Pro Plan</h2>
+        <p className="mb-4">$20 / month</p>
+        <button
+          onClick={handleCheckout}
+          className="bg-yellow-400 text-black font-bold py-2 px-6 rounded hover:bg-yellow-500 transition"
+        >
+          Join Now – $20/month
+        </button>
       </div>
     </div>
   );
