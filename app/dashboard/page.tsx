@@ -91,29 +91,30 @@ export default function DashboardPage() {
       });
   }
 
-  async function fetchReports() {
-    setError(null);
-    try {
-      // force fresh data every time
-      const res = await fetch('/api/dashboard-data', {
-        cache: 'no-store',
-        headers: { 'x-no-cache': Date.now().toString() }, // extra cache buster
-      });
-      if (!res.ok) throw new Error(`Failed to load reports (${res.status})`);
-      const json = await res.json();
+async function fetchReports() {
+  setError(null);
+  try {
+    const res = await fetch('/api/dashboard-data', {
+      cache: 'no-store',
+      headers: { 'x-no-cache': Date.now().toString() },
+    });
+    if (!res.ok) throw new Error(`Failed to load reports (${res.status})`);
 
-      // Support any of these shapes:
-      // { data: { reports: [...] } } | { data: [...] } | { reports: [...] } | [...]
-      const raw =
-        Array.isArray(json) ? json
-        : json?.data?.reports ?? json?.data ?? json?.reports ?? [];
+    const json = await res.json();
 
-      setReports(normalize(raw));
-    } catch (e: any) {
-      setError(e?.message || 'Failed to load reports');
-      setReports([]);
-    }
+    // Prefer json.reports first, fallback to json.data.reports
+    const list = json?.reports ?? json?.data?.reports ?? [];
+
+    // Keep only objects
+    const safe = Array.isArray(list) ? list.filter((x: any) => x && typeof x === 'object') : [];
+
+    setReports(safe);
+  } catch (e: any) {
+    setError(e?.message || 'Failed to load reports');
+    setReports([]);
   }
+}
+
 
   useEffect(() => {
     fetchReports();
