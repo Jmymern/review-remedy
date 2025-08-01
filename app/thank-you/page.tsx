@@ -1,13 +1,11 @@
-'use client'
-
-export default function ThankYouPage() {
+export default function ThankYou() {
   return (
-    <main style={{ padding: '2rem' }}>
-      <h1>🎉 Thank You for Subscribing!</h1>
-      <p>Your plan is now active. You can now generate reports directly from your dashboard.</p>
-      <a href="/dashboard" style={{ color: 'blue', textDecoration: 'underline' }}>
-        → Go to Dashboard
-      </a>
+    <main className="min-h-screen flex items-center justify-center p-8">
+      <div className="max-w-xl text-center space-y-4">
+        <h1 className="text-3xl font-bold">Thanks for joining Review Remedy!</h1>
+        <p>We’ve activated your account. You can start running reports now.</p>
+        <a className="underline" href="/dashboard">Go to Dashboard →</a>
+      </div>
     </main>
   );
 }
