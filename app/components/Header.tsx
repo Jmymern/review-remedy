@@ -1,9 +1,9 @@
 // File: app/components/Header.tsx
 'use client';
-
 import Link from 'next/link';
+import { usePathname } from 'next/navigation';
+import { createClient, type User } from '@supabase/supabase-js';
 import { useEffect, useState } from 'react';
-import { createClient, User } from '@supabase/supabase-js';
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -11,33 +11,33 @@ const supabase = createClient(
 );
 
 export default function Header() {
+  const pathname = usePathname();
   const [user, setUser] = useState<User | null>(null);
 
   useEffect(() => {
-    const getUser = async () => {
-      const { data, error } = await supabase.auth.getUser();
-      if (!error) setUser(data.user);
-    };
-    getUser();
+    supabase.auth.getUser().then(({ data, error }) => {
+      if (!error) setUser(data.user ?? null);
+    });
   }, []);
 
   return (
-    <header className="w-full bg-white border-b px-6 py-4 flex items-center justify-between">
-      <Link href="/" className="text-xl font-bold">
-        <span className="text-black">Review Remedy</span>
-      </Link>
-
-      <nav className="flex items-center gap-4 text-sm sm:text-base">
-        <Link href="/plans" className="hover:underline">Directory</Link>
-        <Link href="/pricing" className="hover:underline">Pricing</Link>
-        {user ? (
-          <Link href="/dashboard" className="hover:underline">Dashboard</Link>
-        ) : (
-          <>
-            <Link href="/login" className="hover:underline">Login</Link>
-            <Link href="/signup" className="hover:underline">Sign Up</Link>
-          </>
-        )}
+    <header className="py-4 border-b">
+      <nav className="max-w-6xl mx-auto px-4 flex justify-between items-center">
+        <Link href="/" className="text-xl font-bold">Review Remedy</Link>
+        <div className="flex items-center gap-4 text-sm">
+          <Link href="/directory" className={pathname === '/directory' ? 'underline' : ''}>Directory</Link>
+          <Link href="/plans" className={pathname === '/plans' ? 'underline' : ''}>Pricing</Link>
+          {user ? (
+            <Link href="/dashboard" className={pathname === '/dashboard' ? 'underline' : ''}>
+              Dashboard
+            </Link>
+          ) : (
+            <>
+              <Link href="/login" className="hover:underline">Login</Link>
+              <Link href="/signup" className="hover:underline">Sign Up</Link>
+            </>
+          )}
+        </div>
       </nav>
     </header>
   );
