@@ -1,69 +1,97 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { createClient } from '@supabase/supabase-js';
-import ReportForm from '../components/ReportForm';
-
-const supabaseUrl = 'https://tyqpgfjbjrcqmrisxvln.supabase.co';
-const supabaseAnonKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR5cXBnZmpianJjcW1yaXN4dmxuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTIzNjU3NTMsImV4cCI6MjA2Nzk0MTc1M30.izgyrjqeooALMd705IW28WLkDN_pyMbpuOTFr1zuAbk';
-const supabase = createClient(supabaseUrl, supabaseAnonKey);
-
-type Report = {
-  id: string;
-  user_id: string;
-  report_name: string;
-  top_complaint: string;
-  top_positive: string;
-  suggestions: string;
-};
+import { useUser } from '@supabase/auth-helpers-react';
+import { useRouter } from 'next/navigation';
 
 export default function DashboardPage() {
-  const [reports, setReports] = useState<Report[]>([]);
+  const user = useUser();
+  const router = useRouter();
+  const [aiSummary, setAiSummary] = useState<string | null>(null);
+  const [reviews, setReviews] = useState<any[]>([]);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchSummary = async () => {
+    setError(null);
+    setAiSummary(null);
+
+    if (!user) {
+      setError('You must be logged in.');
+      return;
+    }
+
+    try {
+      const res = await fetch('/api/summary', {
+        method: 'POST',
+        body: JSON.stringify({ user_id: user.id }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        setError(data.error || 'Something went wrong.');
+        return;
+      }
+
+      if (!data.url) {
+        setError('Missing Google Maps URL.');
+        return;
+      }
+
+      if (!data.reviews || data.reviews.length === 0) {
+        setError('No reviews found.');
+        return;
+      }
+
+      if (!data.summary) {
+        setError('AI summarization failed.');
+        return;
+      }
+
+      setAiSummary(data.summary);
+      setReviews(data.reviews);
+    } catch (err: any) {
+      setError('Unexpected error: ' + err.message);
+    }
+  };
 
   useEffect(() => {
-    const fetchReports = async () => {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) {
-        console.error('No user logged in');
-        return;
-      }
-
-      const { data, error } = await supabase
-        .from('reports')
-        .select('*')
-        .eq('user_id', user.id);
-
-      if (error) {
-        console.error('Error fetching reports:', error.message);
-        return;
-      }
-
-      setReports(data as Report[]);
-    };
-
-    fetchReports();
-  }, []);
+    if (!user) {
+      router.push('/login');
+    }
+  }, [user]);
 
   return (
-    <div style={{ padding: '2rem' }}>
-      <h1>Welcome to Your Dashboard</h1>
-      <ReportForm />
+    <div className="p-8">
+      <h1 className="text-2xl font-bold mb-6">Welcome to Your Dashboard</h1>
 
-      <h2 style={{ marginTop: '2rem' }}>Your Past Reports</h2>
-      {reports.length === 0 ? (
-        <p>No reports found yet.</p>
-      ) : (
-        <ul>
-          {reports.map((report) => (
-            <li key={report.id} style={{ marginBottom: '1rem' }}>
-              <strong>{report.report_name}</strong><br />
-              ❌ Complaint: {report.top_complaint}<br />
-              ✅ Positive: {report.top_positive}<br />
-              💡 Suggestions: {report.suggestions}
-            </li>
-          ))}
-        </ul>
+      <div className="mb-4">
+        <p className="mb-2">Create AI Summary Report</p>
+        <button
+          onClick={fetchSummary}
+          className="bg-black text-white px-4 py-2 rounded hover:opacity-90"
+        >
+          Generate Report
+        </button>
+      </div>
+
+      {error && (
+        <div className="text-red-600 font-medium mt-4">
+          ❌ Failed: {error}
+        </div>
       )}
+
+      {aiSummary && (
+        <div className="mt-6 p-4 border rounded bg-gray-50">
+          <h2 className="text-xl font-semibold mb-2">AI Summary:</h2>
+          <p>{aiSummary}</p>
+        </div>
+      )}
+
+      <div className="mt-6">
+        <h2 className="text-lg font-semibold">Your Past Reports</h2>
+        <p className="text-sm text-gray-500">No reports found yet</p>
+      </div>
     </div>
   );
 }
