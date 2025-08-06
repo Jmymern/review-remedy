@@ -3,78 +3,66 @@
 
 import { useEffect, useState } from "react";
 import { createClient } from "@supabase/supabase-js";
-import { Card, CardContent } from "../components/ui/card";
-
-// then continue with your component code...
+import { Card, CardContent } from "@/components/ui/card";
+import Header from "../components/Header";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 );
 
-export default function Dashboard() {
-  const [reports, setReports] = useState<any[]>([]);
+interface Report {
+  id: string;
+  created_at: string;
+  summary: string;
+}
+
+export default function DashboardPage() {
+  const [reports, setReports] = useState<Report[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const fetchReports = async () => {
-      const user = (await supabase.auth.getUser()).data.user;
-      if (!user) {
-        setError("User not authenticated");
-        setLoading(false);
-        return;
-      }
-
-      const { data: profile, error: profileError } = await supabase
-        .from("profiles")
-        .select("business_id")
-        .eq("id", user.id)
-        .single();
-
-      if (profileError) {
-        setError(profileError.message);
-        setLoading(false);
-        return;
-      }
-
-      if (!profile?.business_id) {
-        setError("No business ID found for this user");
-        setLoading(false);
-        return;
-      }
-
-      supabase
+    async function fetchReports() {
+      const { data, error } = await supabase
         .from("reports")
         .select("id, created_at, summary")
-        .eq("business_id", profile.business_id)
-        .order("created_at", { ascending: false })
-        .then(({ data, error }) => {
-          if (error) setError(error.message);
-          else setReports(data || []);
-          setLoading(false);
-        });
-    };
+        .order("created_at", { ascending: false });
+
+      if (error) setError(error.message);
+      else setReports(data || []);
+      setLoading(false);
+    }
 
     fetchReports();
   }, []);
 
-  if (loading) return <p>Loading...</p>;
-  if (error) return <p className="text-red-500">Error: {error}</p>;
-
   return (
-    <div className="p-4">
-      <h1 className="text-2xl font-bold mb-4">Your AI Reports</h1>
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {reports.map((report) => (
-          <Card key={report.id}>
-            <CardContent className="p-4">
-              <p className="text-sm text-gray-500">{new Date(report.created_at).toLocaleDateString()}</p>
-              <p className="mt-2">{report.summary}</p>
-            </CardContent>
-          </Card>
-        ))}
-      </div>
-    </div>
+    <main className="min-h-screen bg-white text-black">
+      <Header />
+
+      <section className="max-w-4xl mx-auto px-4 py-12">
+        <h1 className="text-3xl font-bold mb-6 text-center">Your AI Reports</h1>
+        {loading && <p className="text-center">Loading...</p>}
+        {error && <p className="text-center text-red-600">{error}</p>}
+
+        {!loading && reports.length === 0 && (
+          <p className="text-center text-gray-600">No reports yet.</p>
+        )}
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+          {reports.map((report) => (
+            <Card key={report.id}>
+              <CardContent>
+                <div className="p-4">
+                  <p className="text-sm text-gray-500">{new Date(report.created_at).toLocaleDateString()}</p>
+                  <p className="mt-2">{report.summary}</p>
+                </div>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      </section>
+    </main>
   );
 }
