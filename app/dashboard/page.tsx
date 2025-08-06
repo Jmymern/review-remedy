@@ -4,8 +4,8 @@
 import { useEffect, useState } from "react";
 import { createClient } from "@supabase/supabase-js";
 import { Card, CardContent } from "@/components/ui/card";
-...
 
+// then continue with your component code...
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
