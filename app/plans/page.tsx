@@ -60,14 +60,13 @@ export default function PlansOverviewPage() {
       const res = await fetch('/api/create-checkout-session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ plan: planId }),
+        body: JSON.stringify({ planId }),
       });
 
       const data = await res.json();
       if (data?.url) {
         window.location.href = data.url;
       } else {
-        console.error('Checkout failed response:', data);
         alert('Checkout failed.');
       }
     } catch (err) {
