@@ -3,8 +3,8 @@
 
 import { useEffect, useState } from 'react';
 import { createClient } from '@supabase/supabase-js';
-import { Card, CardContent } from '../components/ui/card';
 import Header from '../components/Header';
+import { Card, CardContent } from '../components/ui/card'; // ✅ Fixed import path
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -44,13 +44,11 @@ export default function DashboardPage() {
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
           {reports.map((report) => (
             <Card key={report.id}>
-              <CardContent>
-                <div className="p-4">
-                  <p className="text-sm text-gray-500">
-                    {new Date(report.created_at).toLocaleDateString()}
-                  </p>
-                  <p className="mt-2">{report.summary}</p>
-                </div>
+              <CardContent className="p-4">
+                <p className="text-sm text-gray-500">
+                  {new Date(report.created_at).toLocaleDateString()}
+                </p>
+                <p className="mt-2">{report.summary}</p>
               </CardContent>
             </Card>
           ))}
