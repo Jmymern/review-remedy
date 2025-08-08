@@ -2,19 +2,21 @@
 import { NextResponse } from 'next/server';
 
 /**
- * Improvements in this version:
- * - Extracts a stable query from Google Maps URLs (prefers place_id or cid when present).
- * - Adds robust fetchWithRetry (exponential backoff + jitter) for Outscraper and OpenAI.
- * - Keeps dual-endpoint strategy for Outscraper (v3 GET + alt POST fallback).
+ * Adds robust place resolution + retries:
+ * - Accepts Google Maps short links, full links, plain names, or even an <iframe> embed block.
+ * - Extracts src from iframe if present.
+ * - Resolves to a stable `place_id:XXX` via Google Places API when not directly present.
+ * - Retries Outscraper/OpenAI on 429/5xx with exponential backoff.
  */
 
 type AnalyzeBody = {
-  mapUrl: string;      // pasted input (URL, place_id, cid, or name)
+  mapUrl: string;      // pasted input (URL/iframe/name)
   dateRange: string;   // "1" | "30" | "60" | "90" | "365"
 };
 
 const OUTSCRAPER_API_KEY = process.env.OUTSCRAPER_API_KEY || process.env.NEXT_PUBLIC_OUTSCRAPER_KEY;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY; // used to resolve place_id
 
 // ----------------------------- utils -----------------------------
 
@@ -25,43 +27,76 @@ function toUnixCutoff(days: string) {
   return Math.floor(cutoffMs / 1000);
 }
 
-/** Try hard to derive a stable query from a pasted Google Maps link.
- *  - Prefer explicit place_id=... or q=place_id:...
- *  - Otherwise use cid if present
- *  - Otherwise fall back to the raw input (Outscraper can often handle URLs/text).
- */
-function normalizeQuery(input: string): string {
-  let s = input.trim();
-  try { s = decodeURIComponent(s); } catch {}
-
-  // 1) q=place_id:XXXX or "place_id:XXXX"
-  const placeIdInQ = /[?&]q=place_id:([A-Za-z0-9_-]+)/.exec(s);
-  if (placeIdInQ?.[1]) return `place_id:${placeIdInQ[1]}`;
-  const inlinePlaceId = /place_id:([A-Za-z0-9_-]+)/.exec(s);
-  if (inlinePlaceId?.[1]) return `place_id:${inlinePlaceId[1]}`;
-
-  // 2) place_id=XXXX (rare but seen)
-  const placeIdParam = /[?&]place_id=([A-Za-z0-9_-]+)/.exec(s);
-  if (placeIdParam?.[1]) return `place_id:${placeIdParam[1]}`;
-
-  // 3) cid=XXXXXXXXXXXXXXX (big int)
-  const cidParam = /[?&]cid=([0-9]+)/.exec(s);
-  if (cidParam?.[1]) return `cid:${cidParam[1]}`;
-
-  // 4) If it's a clean maps URL (share link), Outscraper can usually take it as-is.
-  return s;
+function extractIframeSrc(input: string): string | null {
+  const m = input.match(/<iframe[^>]*src=["']([^"']+)["']/i);
+  return m?.[1] ?? null;
 }
 
-async function fetchWithRetry(url: string, init: RequestInit, opts?: { tries?: number; baseDelayMs?: number }) {
-  const tries = opts?.tries ?? 4;
-  const base = opts?.baseDelayMs ?? 400;
+function normalizeQueryFromUrlLike(s: string): string | null {
+  try { s = decodeURIComponent(s); } catch {}
+  // place_id=... or q=place_id:...
+  const placeIdQ = /[?&]q=place_id:([A-Za-z0-9_-]+)/.exec(s);
+  if (placeIdQ?.[1]) return `place_id:${placeIdQ[1]}`;
+  const placeIdParam = /[?&]place_id=([A-Za-z0-9_-]+)/.exec(s);
+  if (placeIdParam?.[1]) return `place_id:${placeIdParam[1]}`;
+  // cid=...
+  const cid = /[?&]cid=([0-9]+)/.exec(s);
+  if (cid?.[1]) return `cid:${cid[1]}`;
+  // sometimes "/place/NAME/data=...!3m1!4b1!4m6!3m5!...!8m2!3dLAT!4dLNG!16s%2Fg..." includes 16s=encoded place id
+  const sixteenS = /!16s([^!]+)/.exec(s);
+  if (sixteenS?.[1]) {
+    try {
+      const decoded = decodeURIComponent(sixteenS[1]).replace(/^%2F/,'/');
+      if (decoded.startsWith('/g/')) return `place_id:${decoded.slice(1)}`; // /g/XXXX → place_id:g:XXXX
+    } catch {}
+  }
+  return null; // not directly found
+}
 
+async function resolvePlaceIdViaGooglePlaces(text: string): Promise<string | null> {
+  if (!GOOGLE_MAPS_API_KEY) return null;
+  // Use Find Place From Text API to get place_id
+  const url = new URL('https://maps.googleapis.com/maps/api/place/findplacefromtext/json');
+  url.searchParams.set('input', text);
+  url.searchParams.set('inputtype', 'textquery');
+  url.searchParams.set('fields', 'place_id');
+  url.searchParams.set('key', GOOGLE_MAPS_API_KEY);
+
+  const res = await fetch(url.toString());
+  if (!res.ok) return null;
+  const j = await res.json();
+  const pid = j?.candidates?.[0]?.place_id as string | undefined;
+  return pid ? `place_id:${pid}` : null;
+}
+
+async function deriveStableQuery(input: string): Promise<string> {
+  let raw = input.trim();
+  // If they pasted an iframe embed, extract the src
+  const src = extractIframeSrc(raw);
+  if (src) raw = src;
+
+  // If looks like a URL, try direct parsing first
+  if (/^https?:\/\//i.test(raw)) {
+    const normalized = normalizeQueryFromUrlLike(raw);
+    if (normalized) return normalized;
+    // Fallback: use entire URL as text to resolve place_id via Places API
+    const viaPlaces = await resolvePlaceIdViaGooglePlaces(raw);
+    if (viaPlaces) return viaPlaces;
+    return raw; // Outscraper can sometimes handle raw URLs
+  }
+
+  // Treat as plain business name → resolve via Places API
+  const viaPlaces = await resolvePlaceIdViaGooglePlaces(raw);
+  if (viaPlaces) return viaPlaces;
+  return raw; // fallback
+}
+
+async function fetchWithRetry(url: string, init: RequestInit, tries = 4, baseDelayMs = 400) {
   let lastErr: any;
   for (let i = 0; i < tries; i++) {
     try {
       const res = await fetch(url, init);
       if (!res.ok && (res.status === 429 || res.status >= 500)) {
-        // retryable
         lastErr = new Error(`HTTP ${res.status}`);
       } else {
         return res;
@@ -69,8 +104,7 @@ async function fetchWithRetry(url: string, init: RequestInit, opts?: { tries?: n
     } catch (e) {
       lastErr = e;
     }
-    // backoff with jitter
-    const delay = base * Math.pow(2, i) + Math.floor(Math.random() * 150);
+    const delay = baseDelayMs * Math.pow(2, i) + Math.floor(Math.random() * 150);
     await new Promise((r) => setTimeout(r, delay));
   }
   throw lastErr;
@@ -82,25 +116,18 @@ function extractReviewTexts(json: any): string[] {
   const push = (s: any) => { if (typeof s === 'string' && s.trim()) texts.push(s.trim()); };
 
   try {
-    // v3 typical: { data: [{ reviews_data: [...] }] }
     const blocks = Array.isArray(json?.data) ? json.data : Array.isArray(json) ? json : [];
-
     for (const b of blocks) {
       const arr = b?.reviews_data || b?.reviews || [];
       if (Array.isArray(arr)) {
         for (const r of arr) push(r?.review_text ?? r?.text ?? r?.content ?? r?.review);
       }
-      // flat fallbacks
       push(b?.review_text ?? b?.text ?? b?.content ?? b?.review);
     }
-
-    // Some older responses: { reviews: [...] }
     if (Array.isArray(json?.reviews)) {
       for (const r of json.reviews) push(r?.review_text ?? r?.text ?? r?.content ?? r?.review);
     }
-  } catch {
-    // ignore; we'll return whatever we captured
-  }
+  } catch {}
 
   return Array.from(new Set(texts)).slice(0, 250);
 }
@@ -112,7 +139,7 @@ async function callOutscraperV3(query: string, reviewsLimit = 120, cutoff?: numb
   u.searchParams.set('query', query);
   u.searchParams.set('reviewsLimit', String(reviewsLimit));
   u.searchParams.set('async', 'false');
-  if (cutoff) u.searchParams.set('cutoff', String(cutoff)); // unix timestamp
+  if (cutoff) u.searchParams.set('cutoff', String(cutoff));
 
   return fetchWithRetry(u.toString(), {
     headers: { 'X-API-KEY': OUTSCRAPER_API_KEY!, Accept: 'application/json' },
@@ -144,24 +171,37 @@ async function callOutscraperAlt(query: string, reviewsLimit = 120, cutoff?: num
 async function analyzeWithAI(reviews: string[]) {
   if (!OPENAI_API_KEY) throw new Error('Missing OPENAI_API_KEY');
 
-  const prompt = `Return STRICT JSON only with keys: positives, negatives, actions, summary.\n- positives: top 5 short positive recurring themes\n- negatives: top 5 short negative recurring themes\n- actions: 6-10 practical steps\n- summary: 2-3 sentences\n\nREVIEWS:\n${reviews.map((r) => `- ${r}`).join('\n')}`;
+  const prompt = `Return STRICT JSON only with keys: positives, negatives, actions, summary.
+- positives: top 5 short positive recurring themes
+- negatives: top 5 short negative recurring themes
+- actions: 6-10 practical steps
+- summary: 2-3 sentences
 
-  const r = await fetchWithRetry('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-      'Content-Type': 'application/json',
+REVIEWS:
+${reviews.map((r) => `- ${r}`).join('
+')}`;
+
+  const r = await fetchWithRetry(
+    'https://api.openai.com/v1/chat/completions',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        temperature: 0.2,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: 'Return only valid JSON. No prose.' },
+          { role: 'user', content: prompt },
+        ],
+      }),
     },
-    body: JSON.stringify({
-      model: 'gpt-4o-mini',
-      temperature: 0.2,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: 'Return only valid JSON. No prose.' },
-        { role: 'user', content: prompt },
-      ],
-    }),
-  }, { tries: 4, baseDelayMs: 500 });
+    4,
+    500
+  );
 
   if (!r.ok) throw new Error(`AI ${r.status}: ${await r.text()}`);
 
@@ -193,7 +233,7 @@ export async function POST(req: Request) {
     if (!mapUrl) return NextResponse.json({ error: 'mapUrl is required' }, { status: 400 });
 
     const cutoff = toUnixCutoff(dateRange);
-    const query = normalizeQuery(mapUrl);
+    const query = await deriveStableQuery(mapUrl);
 
     // Primary attempt
     let res = await callOutscraperV3(query, 120, cutoff);
@@ -215,7 +255,7 @@ export async function POST(req: Request) {
     }
 
     const analysis = await analyzeWithAI(reviews);
-    return NextResponse.json({ reviews, analysis, input: { mapUrl, dateRange } });
+    return NextResponse.json({ reviews, analysis, input: { mapUrl, dateRange, query } });
   } catch (err: any) {
     console.error('analyze-reviews error:', err);
     return NextResponse.json({ error: err?.message || 'Server error' }, { status: 500 });
