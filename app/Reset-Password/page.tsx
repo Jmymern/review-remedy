@@ -1,11 +1,8 @@
-// File: app/reset-password/page.tsx
+// File: app/Reset-Password/page.tsx
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { createClient } from '@supabase/supabase-js';
-import { useRouter } from 'next/navigation';
-import Header from '../components/Header';
-import Footer from '../components/Footer';
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -13,41 +10,26 @@ const supabase = createClient(
 );
 
 export default function ResetPasswordPage() {
-  const router = useRouter();
   const [password, setPassword] = useState('');
-  const [confirm, setConfirm] = useState('');
   const [status, setStatus] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
 
-  useEffect(() => {
-    supabase.auth.onAuthStateChange(async (event, session) => {
-      if (!session?.user) {
-        setStatus('Invalid or expired reset link.');
-      }
-    });
-  }, []);
-
-  const handleUpdate = async (e: React.FormEvent) => {
+  async function handleUpdate(e: React.FormEvent) {
     e.preventDefault();
     setStatus(null);
-
-    if (password !== confirm) {
-      setStatus("Passwords don't match");
-      return;
-    }
+    setError(null);
+    setLoading(true);
 
     const { error } = await supabase.auth.updateUser({ password });
 
-    if (error) {
-      setStatus(`Error: ${error.message}`);
-    } else {
-      setStatus('✅ Password updated! Redirecting...');
-      setTimeout(() => router.push('/login'), 2000);
-    }
-  };
+    if (error) setError(error.message);
+    else setStatus('Password updated. You can now log in.');
+    setLoading(false);
+  }
 
   return (
     <main className="min-h-screen bg-white text-black">
-      <Header />
       <section className="max-w-md mx-auto px-6 py-16">
         <h1 className="text-3xl font-bold mb-6 text-center">Reset Password</h1>
         <form onSubmit={handleUpdate} className="space-y-4">
@@ -58,25 +40,26 @@ export default function ResetPasswordPage() {
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             required
+            minLength={8}
           />
-          <input
-            type="password"
-            placeholder="Confirm new password"
-            className="w-full px-4 py-2 border rounded-xl"
-            value={confirm}
-            onChange={(e) => setConfirm(e.target.value)}
-            required
-          />
-          {status && <p className="text-sm text-center">{status}</p>}
+          {error && <p className="text-red-600 text-sm">{error}</p>}
+          {status && <p className="text-green-700 text-sm">{status}</p>}
           <button
             type="submit"
-            className="w-full bg-black text-white py-2 rounded-xl hover:bg-gray-800"
+            disabled={loading}
+            className="w-full bg-black text-white py-2 rounded-xl hover:bg-gray-800 disabled:opacity-60"
           >
-            Update Password
+            {loading ? 'Updating…' : 'Update Password'}
           </button>
         </form>
+        <p className="text-center text-sm text-gray-600 mt-4">
+          Back to{' '}
+          <a href="/login" className="underline">
+            login
+          </a>
+          .
+        </p>
       </section>
-      <Footer />
     </main>
   );
 }
