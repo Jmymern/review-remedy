@@ -14,28 +14,53 @@ export default function LoginPage() {
   const router = useRouter();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [error, setError] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  const handleLogin = async (e: React.FormEvent) => {
+  async function handleLogin(e: React.FormEvent) {
     e.preventDefault();
-    setError(null);
+    setErr(null);
     setLoading(true);
 
     const { error } = await supabase.auth.signInWithPassword({ email, password });
     if (error) {
-      setError(error.message);
+      setErr(error.message);
       setLoading(false);
       return;
     }
+    router.replace('/dashboard'); // AI Analyzer
+  }
 
-    router.push('/dashboard');
-  };
+  async function loginWithGoogle() {
+    setErr(null);
+    setLoading(true);
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: 'google',
+      options: {
+        redirectTo: `${window.location.origin}/dashboard`, // after OAuth
+      },
+    });
+    if (error) {
+      setErr(error.message);
+      setLoading(false);
+    }
+  }
 
   return (
     <main className="min-h-screen bg-white text-black">
       <section className="max-w-md mx-auto px-6 py-16">
         <h1 className="text-3xl font-bold mb-6 text-center">Log In</h1>
+
+        <button
+          onClick={loginWithGoogle}
+          disabled={loading}
+          className="w-full border px-4 py-2 rounded-xl hover:bg-gray-50 mb-4 disabled:opacity-60"
+        >
+          Continue with Google
+        </button>
+
+        <div className="text-center text-xs text-gray-400 mb-4">or</div>
+
         <form onSubmit={handleLogin} className="space-y-4">
           <input
             type="email"
@@ -44,6 +69,7 @@ export default function LoginPage() {
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             required
+            autoComplete="email"
           />
           <input
             type="password"
@@ -52,8 +78,9 @@ export default function LoginPage() {
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             required
+            autoComplete="current-password"
           />
-          {error && <p className="text-red-600 text-sm">{error}</p>}
+          {err && <p className="text-red-600 text-sm">{err}</p>}
           <button
             type="submit"
             disabled={loading}
@@ -62,8 +89,9 @@ export default function LoginPage() {
             {loading ? 'Logging in…' : 'Log In'}
           </button>
         </form>
+
         <p className="text-center text-sm text-gray-600 mt-4">
-          Don't have an account? <a href="/signup" className="underline">Sign up</a>
+          Don&apos;t have an account? <a href="/signup" className="underline">Sign up</a>
         </p>
         <p className="text-center text-sm text-gray-600 mt-2">
           Forgot password? <a href="/Forgot-Password" className="underline">Reset it</a>

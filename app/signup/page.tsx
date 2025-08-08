@@ -14,29 +14,54 @@ export default function SignupPage() {
   const router = useRouter();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [error, setError] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  const handleSignup = async (e: React.FormEvent) => {
+  async function handleSignup(e: React.FormEvent) {
     e.preventDefault();
-    setError(null);
+    setErr(null);
     setLoading(true);
 
     const { error } = await supabase.auth.signUp({ email, password });
     if (error) {
-      setError(error.message);
+      setErr(error.message);
       setLoading(false);
       return;
     }
+    // If email confirmation is ON, user may need to verify first.
+    router.replace('/dashboard'); // AI Analyzer
+  }
 
-    // Optional: You can require email confirmation depending on Supabase settings
-    router.push('/dashboard');
-  };
+  async function signupWithGoogle() {
+    setErr(null);
+    setLoading(true);
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: 'google',
+      options: {
+        redirectTo: `${window.location.origin}/dashboard`,
+      },
+    });
+    if (error) {
+      setErr(error.message);
+      setLoading(false);
+    }
+  }
 
   return (
     <main className="min-h-screen bg-white text-black">
       <section className="max-w-md mx-auto px-6 py-16">
         <h1 className="text-3xl font-bold mb-6 text-center">Create Account</h1>
+
+        <button
+          onClick={signupWithGoogle}
+          disabled={loading}
+          className="w-full border px-4 py-2 rounded-xl hover:bg-gray-50 mb-4 disabled:opacity-60"
+        >
+          Continue with Google
+        </button>
+
+        <div className="text-center text-xs text-gray-400 mb-4">or</div>
+
         <form onSubmit={handleSignup} className="space-y-4">
           <input
             type="email"
@@ -45,6 +70,7 @@ export default function SignupPage() {
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             required
+            autoComplete="email"
           />
           <input
             type="password"
@@ -54,8 +80,9 @@ export default function SignupPage() {
             onChange={(e) => setPassword(e.target.value)}
             required
             minLength={8}
+            autoComplete="new-password"
           />
-          {error && <p className="text-red-600 text-sm">{error}</p>}
+          {err && <p className="text-red-600 text-sm">{err}</p>}
           <button
             type="submit"
             disabled={loading}
@@ -64,6 +91,7 @@ export default function SignupPage() {
             {loading ? 'Creating…' : 'Sign Up'}
           </button>
         </form>
+
         <p className="text-center text-sm text-gray-600 mt-4">
           Already have an account? <a href="/login" className="underline">Log in</a>
         </p>
