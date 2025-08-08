@@ -1,8 +1,6 @@
 // File: app/plans/page.tsx
 'use client';
 
-import Header from '../components/Header';
-
 const plans = [
   {
     title: 'Charter Member',
@@ -12,7 +10,7 @@ const plans = [
     features: [
       'Founding Member Access',
       'Exclusive Beta Features',
-      'Community Support'
+      'Community Support',
     ],
   },
   {
@@ -65,11 +63,9 @@ const plans = [
   },
 ];
 
-export default function PlansOverviewPage() {
+export default function PlansPage() {
   return (
     <main className="min-h-screen bg-white text-black">
-      <Header />
-
       <section className="px-4 py-12">
         <h1 className="text-3xl sm:text-4xl font-bold text-center mb-8">Compare All Plans</h1>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-6">
