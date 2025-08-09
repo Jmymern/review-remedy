@@ -1,8 +1,19 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
-type ResolvedInfo = {
+type AnalyzerResult = {
+  resolved?: { placeId?: string | null; queryParam?: string };
+  reviews: string[];
+  analysis: {
+    summary?: string;
+    positives: string[];
+    negatives: string[];
+    actions: string[];
+  };
+};
+
+type ResolveResp = {
   normalizedUrl?: string;
   placeId?: string;
   name?: string;
@@ -10,42 +21,57 @@ type ResolvedInfo = {
 };
 
 export default function AIAnalyzerPage() {
-  const [mapUrl, setMapUrl] = useState('');
+  const [input, setInput] = useState('');
   const [dateRange, setDateRange] = useState('30');
-  const [resolving, setResolving] = useState(false);
-  const [resolved, setResolved] = useState<ResolvedInfo | null>(null);
 
+  // live resolver state
+  const [resolving, setResolving] = useState(false);
+  const [resolved, setResolved] = useState<ResolveResp | null>(null);
+  const [resolveErr, setResolveErr] = useState<string | null>(null);
+
+  // analysis state
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<any>(null);
+  const [result, setResult] = useState<AnalyzerResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Normalize/resolve to place_id on blur or when the user pastes
-  async function resolvePlace(input: string) {
-    if (!input) return;
-    setResolving(true);
-    setResolved(null);
-    try {
-      const r = await fetch('/api/resolve-place', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userInput: input }),
-      });
-      const data: ResolvedInfo = await r.json();
-      setResolved(data);
-      if (data.error) setError(data.error);
-      else setError(null);
-    } catch (e: any) {
-      setResolved({ error: e?.message || 'Failed to resolve place' });
-      setError(e?.message || 'Failed to resolve place');
-    } finally {
-      setResolving(false);
-    }
-  }
+  const debounceId = useRef<number | null>(null);
 
-  // trigger resolve when user leaves the field
-  function handleBlur() {
-    resolvePlace(mapUrl.trim());
-  }
+  // Debounced resolve on every input change
+  useEffect(() => {
+    if (debounceId.current) window.clearTimeout(debounceId.current);
+    setResolveErr(null);
+    setResolved(null);
+
+    const trimmed = input.trim();
+    if (!trimmed) return;
+
+    debounceId.current = window.setTimeout(async () => {
+      try {
+        setResolving(true);
+        const r = await fetch('/api/resolve-place', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userInput: trimmed }),
+        });
+        const data: ResolveResp = await r.json();
+        if (!r.ok || data.error) {
+          setResolveErr(data.error || 'Could not resolve place.');
+          setResolved(null);
+        } else {
+          setResolved(data);
+        }
+      } catch (e: any) {
+        setResolveErr(e?.message || 'Resolve failed');
+        setResolved(null);
+      } finally {
+        setResolving(false);
+      }
+    }, 450);
+
+    return () => {
+      if (debounceId.current) window.clearTimeout(debounceId.current);
+    };
+  }, [input]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -54,17 +80,19 @@ export default function AIAnalyzerPage() {
     setResult(null);
 
     try {
-      const payload: any = { mapUrl, dateRange };
-      if (resolved?.placeId) payload.placeId = resolved.placeId;
-
       const res = await fetch('/api/analyze-reviews', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({
+          mapUrl: input.trim(),
+          dateRange,
+          // pass the resolved placeId if we have it
+          placeId: resolved?.placeId,
+        }),
       });
 
       const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || 'Analysis failed');
+      if (!res.ok) throw new Error(data?.error || 'Failed to analyze');
       setResult(data);
     } catch (err: any) {
       setError(err.message || 'Something went wrong');
@@ -73,149 +101,145 @@ export default function AIAnalyzerPage() {
     }
   }
 
+  async function exportPdf() {
+    if (!result) return;
+    const res = await fetch('/api/analyze-reviews', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ exportPdf: true, result }),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      alert(data?.error || 'PDF export failed');
+      return;
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'review-remedy-report.pdf';
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
   return (
     <main className="min-h-screen bg-white text-black px-4 py-10 max-w-4xl mx-auto">
-      <h1 className="text-3xl font-bold mb-6">AI Analyzer</h1>
+      <h1 className="text-3xl font-bold mb-6 text-center">AI Analyzer</h1>
 
       <form onSubmit={handleSubmit} className="space-y-4 mb-6">
-        <label className="block text-sm font-medium">
-          Business Link (Google Maps URL)
-        </label>
+        <label className="block text-sm font-medium">Business Link (Google Maps URL)</label>
         <textarea
-          placeholder="Paste any Google Maps link or embed code"
-          value={mapUrl}
-          onChange={(e) => setMapUrl(e.target.value)}
-          onBlur={handleBlur}
           rows={3}
-          className="w-full border px-3 py-2 rounded"
+          placeholder="Paste any Google Maps link (long, short, or embed) OR type the business name/address"
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          className="w-full border px-4 py-2 rounded"
+          required
         />
 
-        <label className="block text-sm font-medium">Timeframe</label>
-        <select
-          value={dateRange}
-          onChange={(e) => setDateRange(e.target.value)}
-          className="w-full border px-3 py-2 rounded"
-        >
-          <option value="1">Last 24 hours</option>
-          <option value="30">Last 30 days</option>
-          <option value="60">Last 60 days</option>
-          <option value="90">Last 90 days</option>
-          <option value="365">Last 365 days</option>
-        </select>
+        {/* live resolver status */}
+        <div className="text-sm">
+          {resolving && <p className="text-gray-500">Resolving place…</p>}
+          {!resolving && resolved?.placeId && (
+            <p className="text-gray-700">
+              Resolved <span className="font-semibold">{resolved.name || 'place'}</span> —{' '}
+              <code className="bg-gray-100 px-1 py-0.5 rounded">place_id: {resolved.placeId}</code>
+            </p>
+          )}
+          {!resolving && resolveErr && (
+            <p className="text-red-600">Couldn’t resolve: {resolveErr}</p>
+          )}
+        </div>
 
-        <div className="flex items-center gap-3">
-          <button
-            type="button"
-            onClick={() => resolvePlace(mapUrl.trim())}
-            disabled={!mapUrl || resolving}
-            className="border px-4 py-2 rounded hover:bg-gray-100"
+        <div className="flex gap-3 items-center">
+          <label className="text-sm font-medium">Timeframe</label>
+          <select
+            value={dateRange}
+            onChange={(e) => setDateRange(e.target.value)}
+            className="border px-3 py-2 rounded"
           >
-            {resolving ? 'Resolving…' : 'Resolve Business'}
-          </button>
-
+            <option value="1">Last 24 hours</option>
+            <option value="30">Last 30 days</option>
+            <option value="60">Last 60 days</option>
+            <option value="90">Last 90 days</option>
+            <option value="365">Last 365 days</option>
+          </select>
           <button
             type="submit"
-            disabled={loading || resolving || !mapUrl}
-            className="bg-black text-white px-6 py-2 rounded hover:bg-gray-800"
+            disabled={loading}
+            className="ml-auto bg-black text-white px-5 py-2 rounded hover:bg-gray-800"
           >
             {loading ? 'Analyzing…' : 'Run Analysis'}
           </button>
-
-          <button
-            type="button"
-            disabled={!result}
-            onClick={async () => {
-              if (!result) return;
-              const r = await fetch('/api/analyze-reviews', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  mapUrl,
-                  dateRange,
-                  placeId: resolved?.placeId,
-                  exportPdf: true,
-                  result, // send the already computed result for PDF export
-                }),
-              });
-              const blob = await r.blob();
-              const url = URL.createObjectURL(blob);
-              const a = document.createElement('a');
-              a.href = url;
-              a.download = 'review-remedy-report.pdf';
-              a.click();
-              URL.revokeObjectURL(url);
-            }}
-            className="border px-4 py-2 rounded hover:bg-gray-100"
-          >
-            Export PDF
-          </button>
         </div>
+
+        {error && (
+          <p className="text-sm text-red-600 border border-red-300 rounded px-3 py-2">
+            {error}
+          </p>
+        )}
       </form>
 
-      {/* Debug / confirmation for users */}
-      {resolved && (
-        <div className="text-sm rounded border p-3 bg-gray-50 mb-6">
-          <p><strong>Detected Name:</strong> {resolved.name || '—'}</p>
-          <p><strong>place_id:</strong> {resolved.placeId || '—'}</p>
-          <p className="break-all">
-            <strong>Normalized URL:</strong> {resolved.normalizedUrl || '—'}
-          </p>
-          {resolved.error && (
-            <p className="text-red-600 mt-2">{resolved.error}</p>
-          )}
-        </div>
+      {!result && (
+        <section>
+          <h2 className="text-lg font-semibold mb-2">Your Reports</h2>
+          <p className="text-gray-600">No reports yet. Run your first analysis above.</p>
+        </section>
       )}
 
-      {error && <p className="text-red-600 mb-6">{error}</p>}
-
-      {/* Results */}
       {result && (
-        <div className="space-y-6">
-          {!!result.analysis?.summary && (
+        <section className="space-y-6">
+          <div className="flex items-center justify-between">
+            <h2 className="text-xl font-semibold">Analysis Result</h2>
+            <button onClick={exportPdf} className="border px-4 py-2 rounded hover:bg-gray-50">
+              Export PDF
+            </button>
+          </div>
+
+          {result.analysis?.summary && (
             <div>
-              <h2 className="text-2xl font-semibold mb-2">Summary</h2>
+              <h3 className="text-lg font-semibold mb-1">Summary</h3>
               <p className="text-gray-800">{result.analysis.summary}</p>
             </div>
           )}
 
           <div>
-            <h2 className="text-2xl font-semibold mb-2">Reviews Analyzed</h2>
-            <ul className="list-disc pl-6">
-              {(result.reviews || []).map((review: string, i: number) => (
-                <li key={i}>{review}</li>
+            <h3 className="text-lg font-semibold mb-1">Reviews Analyzed</h3>
+            <ul className="list-disc pl-6 space-y-1">
+              {result.reviews.map((r, i) => (
+                <li key={i}>{r}</li>
               ))}
             </ul>
           </div>
 
           <div className="grid md:grid-cols-2 gap-6">
             <div>
-              <h2 className="text-2xl font-semibold mb-2">Top 5 Positives</h2>
-              <ul className="list-disc pl-6">
-                {(result.analysis?.positives || []).map((pos: string, i: number) => (
-                  <li key={i}>{pos}</li>
+              <h3 className="text-lg font-semibold mb-1">Top 5 Positives</h3>
+              <ul className="list-disc pl-6 space-y-1">
+                {result.analysis.positives.map((p, i) => (
+                  <li key={i}>{p}</li>
                 ))}
               </ul>
             </div>
-
             <div>
-              <h2 className="text-2xl font-semibold mb-2">Top 5 Negatives</h2>
-              <ul className="list-disc pl-6">
-                {(result.analysis?.negatives || []).map((neg: string, i: number) => (
-                  <li key={i}>{neg}</li>
+              <h3 className="text-lg font-semibold mb-1">Top 5 Negatives</h3>
+              <ul className="list-disc pl-6 space-y-1">
+                {result.analysis.negatives.map((n, i) => (
+                  <li key={i}>{n}</li>
                 ))}
               </ul>
             </div>
           </div>
 
           <div>
-            <h2 className="text-2xl font-semibold mb-2">Action Steps</h2>
-            <ul className="list-disc pl-6">
-              {(result.analysis?.actions || []).map((act: string, i: number) => (
-                <li key={i}>{act}</li>
+            <h3 className="text-lg font-semibold mb-1">Action Steps</h3>
+            <ul className="list-disc pl-6 space-y-1">
+              {result.analysis.actions.map((a, i) => (
+                <li key={i}>{a}</li>
               ))}
             </ul>
           </div>
-        </div>
+        </section>
       )}
     </main>
   );
