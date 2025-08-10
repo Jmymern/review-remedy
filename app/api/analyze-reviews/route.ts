@@ -1,37 +1,177 @@
 import { NextResponse } from 'next/server';
 
-const OUTSCRAPER_BASE = 'https://api.app.outscraper.com';
-const MAX_POLL_MS = 60_000; // stop after 60s
-const POLL_INTERVAL_MS = 2500;
+const OUTSCRAPER_KEY = process.env.OUTSCRAPER_API_KEY;
+const GOOGLE_KEY = process.env.GOOGLE_MAPS_API_KEY;
+const OPENAI_KEY = process.env.OPENAI_API_KEY;
 
-function sleep(ms: number) {
-  return new Promise((r) => setTimeout(r, ms));
+function sleep(ms: number) { return new Promise(res => setTimeout(res, ms)); }
+
+function extractFromIframe(html: string): string | null {
+  const m = html.match(/<iframe[^>]+src="([^"]+)"/i);
+  return m?.[1] || null;
+}
+function extractPlaceIdFromUrl(url: string): string | null {
+  const m = url.match(/[?&]placeid=([^&]+)/i) || url.match(/place_id=([^&]+)/i);
+  return m?.[1] ? decodeURIComponent(m[1]) : null;
+}
+function normalizeUserInput(input: string): string {
+  const trimmed = input.trim();
+  const iframeSrc = /<iframe/i.test(trimmed) ? extractFromIframe(trimmed) : null;
+  return iframeSrc || trimmed;
 }
 
-async function fetchJson(url: string, init?: RequestInit) {
-  const r = await fetch(url, init);
-  const text = await r.text();
-  let json: any = null;
-  try { json = JSON.parse(text); } catch { /* keep text for diagnostics */ }
-  if (!r.ok) {
-    throw new Error(
-      `HTTP ${r.status} ${r.statusText}${json ? `: ${JSON.stringify(json)}` : `: ${text}`}`
-    );
+async function resolvePlaceId(userInput: string): Promise<{ placeId?: string; name?: string; normalizedUrl: string; }> {
+  const normalizedUrl = normalizeUserInput(userInput);
+
+  // if the URL already carries place_id, use it
+  const direct = extractPlaceIdFromUrl(normalizedUrl);
+  if (direct) return { placeId: direct, name: undefined, normalizedUrl };
+
+  if (!GOOGLE_KEY) return { normalizedUrl };
+
+  // Ask Places "Find Place From Text"
+  const url =
+    `https://maps.googleapis.com/maps/api/place/findplacefromtext/json?` +
+    `input=${encodeURIComponent(normalizedUrl)}` +
+    `&inputtype=textquery&fields=place_id,name&key=${GOOGLE_KEY}`;
+
+  const r = await fetch(url, { cache: 'no-store' });
+  const data = await r.json();
+  const placeId = data?.candidates?.[0]?.place_id;
+  const name = data?.candidates?.[0]?.name;
+  return { placeId, name, normalizedUrl };
+}
+
+async function submitOutscraper(placeId: string, period: string, limit = 80) {
+  // async request submit (this returns Pending + results_location)
+  const submitUrl =
+    `https://api.app.outscraper.com/maps/reviews-v3` +
+    `?query=${encodeURIComponent(`place_id:${placeId}`)}` +
+    `&reviewsPeriod=${encodeURIComponent(period)}` +
+    `&reviewsLimit=${limit}`;
+
+  const s = await fetch(submitUrl, {
+    headers: { 'X-API-KEY': OUTSCRAPER_KEY! },
+    cache: 'no-store',
+  });
+
+  if (!s.ok) {
+    const txt = await s.text();
+    throw new Error(`Outscraper submit failed (${s.status}): ${txt}`);
   }
-  return json ?? {};
+
+  const body = await s.json();
+  const results_location = body?.results_location;
+  if (!results_location) throw new Error(`Outscraper didn't return results_location`);
+  return results_location as string;
 }
 
-// Tiny, no‑dep PDF
-function makeSimplePdf(text: string): Uint8Array {
-  const header = `%PDF-1.1\n`;
-  const safe = text.replace(/\(/g, '\\(').replace(/\)/g, '\\)');
-  const content =
+async function pollOutscraper(results_location: string, maxWaitMs = 60_000) {
+  const start = Date.now();
+  while (Date.now() - start < maxWaitMs) {
+    const r = await fetch(results_location, {
+      headers: { 'X-API-KEY': OUTSCRAPER_KEY! },
+      cache: 'no-store',
+    });
+    if (!r.ok) {
+      const txt = await r.text();
+      throw new Error(`Outscraper poll failed (${r.status}): ${txt}`);
+    }
+    const json = await r.json();
+    const status = json?.status;
+    if (status === 'Success') return json?.data;
+    if (status && /expired|failed/i.test(status)) {
+      throw new Error(`Outscraper status: ${status}`);
+    }
+    await sleep(1500);
+  }
+  throw new Error('Outscraper timeout waiting for results');
+}
+
+async function fallbackGooglePlaceReviews(placeId: string): Promise<string[]> {
+  // Fallback: Google Place Details (limited reviews count, but avoids a dead end)
+  if (!GOOGLE_KEY) return [];
+  const url =
+    `https://maps.googleapis.com/maps/api/place/details/json?place_id=${encodeURIComponent(placeId)}` +
+    `&fields=review&key=${GOOGLE_KEY}`;
+  const r = await fetch(url, { cache: 'no-store' });
+  const j = await r.json();
+  const reviews = j?.result?.reviews || [];
+  return reviews.map((rv: any) => rv?.text).filter(Boolean);
+}
+
+function buildPrompt(reviews: string) {
+  return `
+You are Review Remedy. Analyze these customer reviews and produce:
+Top 5 Positives: (one short bullet per line)
+Top 5 Negatives: (one short bullet per line)
+Action Steps: (5–8 short bullets)
+Summary: (one sentence)
+
+REVIEWS:
+${reviews}
+`.trim();
+}
+
+function parseList(src: string, startLabel: string, endLabel?: string, max = 5) {
+  const startIdx = src.toLowerCase().indexOf(startLabel.toLowerCase());
+  let section = '';
+  if (startIdx >= 0) {
+    const from = startIdx + startLabel.length;
+    if (endLabel) {
+      const endIdx = src.toLowerCase().indexOf(endLabel.toLowerCase(), from);
+      section = (endIdx >= 0 ? src.slice(from, endIdx) : src.slice(from)).trim();
+    } else {
+      section = src.slice(from).trim();
+    }
+  }
+  return section
+    .split('\n')
+    .map(l => l.replace(/^[-*\d.\s]+/, '').trim())
+    .filter(Boolean)
+    .slice(0, max);
+}
+
+export async function POST(req: Request) {
+  try {
+    const body = await req.json().catch(() => ({}));
+    const { mapUrl, dateRange = '30', peekResolve, exportPdf, result } = body || {};
+
+    // quick resolve-only path for the UI “shows place_id while typing”
+    if (peekResolve) {
+      const resolved = await resolvePlaceId(mapUrl || '');
+      return NextResponse.json({ resolved });
+    }
+
+    // PDF export path
+    if (exportPdf && result) {
+      const lines: string[] = [];
+      lines.push(`Review Remedy — AI Report`);
+      lines.push('');
+      if (result.analysis?.summary) {
+        lines.push(`Summary: ${result.analysis.summary}`);
+        lines.push('');
+      }
+      lines.push(`Top 5 Positives:`);
+      (result.analysis?.positives || []).forEach((p: string) => lines.push(`- ${p}`));
+      lines.push('');
+      lines.push(`Top 5 Negatives:`);
+      (result.analysis?.negatives || []).forEach((n: string) => lines.push(`- ${n}`));
+      lines.push('');
+      lines.push(`Action Steps:`);
+      (result.analysis?.actions || []).forEach((a: string) => lines.push(`- ${a}`));
+      lines.push('');
+      lines.push(`Reviews:`);
+      (result.reviews || []).slice(0, 50).forEach((rv: string) => lines.push(`- ${rv}`));
+
+      const header = `%PDF-1.1\n`;
+      const content =
 `1 0 obj <</Type /Catalog /Pages 2 0 R>> endobj
 2 0 obj <</Type /Pages /Kids [3 0 R] /Count 1>> endobj
 3 0 obj <</Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources <</Font <</F1 5 0 R>>>>>> endobj
 5 0 obj <</Type /Font /Subtype /Type1 /BaseFont /Helvetica>> endobj
-4 0 obj <</Length ${safe.length + 91}>> stream
-BT /F1 12 Tf 72 720 Td (${safe}) Tj ET
+4 0 obj <</Length ${lines.join('\\n').length + 91}>> stream
+BT /F1 10 Tf 40 740 Td (${lines.join('\\n').replace(/\(/g,'\\(').replace(/\)/g,'\\)')}) Tj ET
 endstream endobj
 xref
 0 6
@@ -45,269 +185,81 @@ trailer <</Size 6 /Root 1 0 R>>
 startxref
 612
 %%EOF`;
-  return new TextEncoder().encode(header + content);
-}
-
-function tryParsePlaceIdFromUrl(input: string): string | null {
-  try {
-    const u = new URL(input);
-    // 1) place_id in query string?
-    const pid = u.searchParams.get('query_place_id') || u.searchParams.get('place_id');
-    if (pid) return pid;
-
-    // 2) embedded in pb param (messy, heuristic)
-    const pb = u.searchParams.get('pb');
-    if (pb && pb.includes('!1s')) {
-      // sometimes place_id is in there; not reliable, so we skip here
-    }
-
-    // 3) short link? (maps.app.goo.gl) -> no place_id inside; we’ll resolve later
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-async function resolvePlaceId(input: string): Promise<string | null> {
-  const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY;
-  if (!GOOGLE_MAPS_API_KEY) return null;
-
-  // If it already looks like a URL, try “find place from text” with the URL itself,
-  // otherwise treat it as a plain business name.
-  const looksLikeUrl = /^https?:\/\//i.test(input.trim());
-  const query = looksLikeUrl ? input.trim() : `${input.trim()}`;
-
-  const url =
-    `https://maps.googleapis.com/maps/api/place/findplacefromtext/json` +
-    `?input=${encodeURIComponent(query)}` +
-    `&inputtype=textquery&fields=place_id,name,formatted_address` +
-    `&key=${GOOGLE_MAPS_API_KEY}`;
-
-  const data = await fetchJson(url);
-  return data?.candidates?.[0]?.place_id ?? null;
-}
-
-function buildOpenAiPrompt(reviews: string[]) {
-  return `
-You are Review Remedy. Analyze these customer reviews and produce exactly:
-
-Top 5 Positives:
-- short bullet
-- short bullet
-- short bullet
-- short bullet
-- short bullet
-
-Top 5 Negatives:
-- short bullet
-- short bullet
-- short bullet
-- short bullet
-- short bullet
-
-Action Steps:
-- 5–8 short, concrete, non-generic bullets businesses can act on.
-
-Summary:
-- One concise sentence.
-
-REVIEWS:
-${reviews.map((r) => `- ${r}`).join('\n')}
-`.trim();
-}
-
-async function runOpenAiAnalysis(reviews: string[]) {
-  const OPENAI_API_KEY = process.env.OPENAI_API_KEY!;
-  const res = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: 'gpt-4o-mini',
-      messages: [{ role: 'user', content: buildOpenAiPrompt(reviews) }],
-      temperature: 0.4,
-    }),
-  });
-  const json = await res.json();
-  const text: string = json?.choices?.[0]?.message?.content || '';
-
-  const sliceBetween = (src: string, start: string, end?: string) => {
-    const s = src.indexOf(start);
-    if (s < 0) return '';
-    const from = s + start.length;
-    if (!end) return src.slice(from).trim();
-    const e = src.indexOf(end, from);
-    return (e < 0 ? src.slice(from) : src.slice(from, e)).trim();
-  };
-
-  const positives = sliceBetween(text, 'Top 5 Positives:', 'Top 5 Negatives:')
-    .split('\n')
-    .map((l) => l.replace(/^[-*\d.\s]+/, '').trim())
-    .filter(Boolean)
-    .slice(0, 5);
-
-  const negatives = sliceBetween(text, 'Top 5 Negatives:', 'Action Steps:')
-    .split('\n')
-    .map((l) => l.replace(/^[-*\d.\s]+/, '').trim())
-    .filter(Boolean)
-    .slice(0, 5);
-
-  const actions = sliceBetween(text, 'Action Steps:', 'Summary:')
-    .split('\n')
-    .map((l) => l.replace(/^[-*\d.\s]+/, '').trim())
-    .filter(Boolean)
-    .slice(0, 8);
-
-  const summary =
-    sliceBetween(text, 'Summary:').split('\n').map((s) => s.trim()).filter(Boolean)[0] || '';
-
-  return { positives, negatives, actions, summary };
-}
-
-async function getReviewsFromGooglePlaces(placeId: string, max = 5) {
-  const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY!;
-  const url =
-    `https://maps.googleapis.com/maps/api/place/details/json?place_id=${encodeURIComponent(placeId)}` +
-    `&fields=reviews&key=${GOOGLE_MAPS_API_KEY}`;
-  const data = await fetchJson(url);
-  const reviews: string[] =
-    data?.result?.reviews?.map((r: any) => r?.text).filter(Boolean).slice(0, max) || [];
-  return reviews;
-}
-
-export async function POST(req: Request) {
-  const body = await req.json().catch(() => ({}));
-  const {
-    mapUrl = '',
-    dateRange = '30',
-    peekResolve = false,
-    placeId: clientPlaceId,
-    exportPdf = false,
-    result,
-  } = body || {};
-
-  const OUTSCRAPER_API_KEY = process.env.OUTSCRAPER_API_KEY;
-  const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY;
-  const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-
-  // Export PDF without re-calling APIs
-  if (exportPdf && result) {
-    const lines: string[] = [];
-    lines.push(`Review Remedy — AI Report`);
-    lines.push('');
-    if (result.analysis?.summary) {
-      lines.push(`Summary: ${result.analysis.summary}`);
-      lines.push('');
-    }
-    lines.push('Top 5 Positives:');
-    (result.analysis?.positives || []).forEach((x: string) => lines.push(`- ${x}`));
-    lines.push('');
-    lines.push('Top 5 Negatives:');
-    (result.analysis?.negatives || []).forEach((x: string) => lines.push(`- ${x}`));
-    lines.push('');
-    lines.push('Action Steps:');
-    (result.analysis?.actions || []).forEach((x: string) => lines.push(`- ${x}`));
-    lines.push('');
-    lines.push('Reviews:');
-    (result.reviews || []).slice(0, 40).forEach((x: string) => lines.push(`- ${x}`));
-
-    const pdf = makeSimplePdf(lines.join('\n'));
-    return new Response(pdf, {
-      headers: {
-        'Content-Type': 'application/pdf',
-        'Content-Disposition': 'attachment; filename="review-remedy-report.pdf"',
-      },
-    });
-  }
-
-  if (!OPENAI_API_KEY) {
-    return NextResponse.json({ error: 'Missing OPENAI_API_KEY' }, { status: 500 });
-  }
-
-  // Resolve place_id (URL or name)
-  let placeId =
-    clientPlaceId ||
-    tryParsePlaceIdFromUrl(mapUrl) ||
-    (GOOGLE_MAPS_API_KEY ? await resolvePlaceId(mapUrl) : null);
-
-  if (peekResolve) {
-    return NextResponse.json({ resolved: { placeId: placeId || null } });
-  }
-
-  // Prefer Outscraper if we have its key
-  let reviews: string[] = [];
-  let queryParam = '';
-
-  if (OUTSCRAPER_API_KEY && placeId) {
-    try {
-      queryParam = `place_id:${placeId}`;
-      const startUrl =
-        `${OUTSCRAPER_BASE}/maps/reviews-v3?query=${encodeURIComponent(queryParam)}` +
-        `&reviewsLimit=80&reviewsPeriod=${encodeURIComponent(dateRange)}`;
-
-      const start = await fetch(startUrl, {
-        headers: { 'X-API-KEY': OUTSCRAPER_API_KEY },
-        cache: 'no-store',
+      const pdf = new TextEncoder().encode(header + content);
+      return new Response(pdf, {
+        headers: {
+          'Content-Type': 'application/pdf',
+          'Content-Disposition': 'attachment; filename="review-remedy-report.pdf"',
+        },
       });
-
-      // Some accounts may return directly with data array (sync).
-      // Others return {status:"Pending", results_location: "..."} (async).
-      const startJson = await start.json().catch(() => ({} as any));
-
-      if (Array.isArray(startJson) && startJson[0]?.reviews) {
-        reviews =
-          startJson[0].reviews.map((r: any) => r?.review_text).filter(Boolean) || [];
-      } else if (startJson?.results_location) {
-        const pollUrl = startJson.results_location as string;
-        const started = Date.now();
-        while (Date.now() - started < MAX_POLL_MS) {
-          await sleep(POLL_INTERVAL_MS);
-          const poll = await fetchJson(pollUrl, {
-            headers: { 'X-API-KEY': OUTSCRAPER_API_KEY },
-            cache: 'no-store',
-          });
-
-          const status = (poll?.status || '').toLowerCase();
-          if (status === 'success' || poll?.data) {
-            const dataArr = poll?.data ?? poll?.result ?? poll;
-            const arr = Array.isArray(dataArr) ? dataArr : [];
-            reviews =
-              arr?.[0]?.reviews?.map((r: any) => r?.review_text).filter(Boolean) || [];
-            break;
-          }
-
-          if (status === 'error' || status === 'failed') {
-            throw new Error(`Outscraper job failed: ${JSON.stringify(poll)}`);
-          }
-        }
-      } else if (startJson?.status?.toLowerCase() === 'pending') {
-        // No results_location? very rare; we’ll bail to fallback later
-        throw new Error('Outscraper returned Pending without results_location.');
-      }
-    } catch (e: any) {
-      // fall through to fallback
     }
+
+    if (!mapUrl) return NextResponse.json({ error: 'Missing mapUrl' }, { status: 400 });
+    if (!OUTSCRAPER_KEY) return NextResponse.json({ error: 'Missing OUTSCRAPER_API_KEY' }, { status: 500 });
+    if (!OPENAI_KEY) return NextResponse.json({ error: 'Missing OPENAI_API_KEY' }, { status: 500 });
+
+    // 1) resolve place_id first
+    const resolved = await resolvePlaceId(mapUrl);
+    const placeId = resolved.placeId;
+    if (!placeId) {
+      return NextResponse.json({ error: 'Could not resolve a Google place_id from that input.' }, { status: 400 });
+    }
+
+    // 2) Outscraper async flow
+    let reviews: string[] = [];
+    try {
+      const results_location = await submitOutscraper(placeId, String(dateRange || '30'));
+      const data = await pollOutscraper(results_location);
+      // Try common shapes
+      const arr = Array.isArray(data) ? data : data?.data || [];
+      const first = Array.isArray(arr) ? arr[0] : null;
+      reviews =
+        first?.reviews?.map((r: any) => r?.review_text).filter(Boolean) ||
+        arr?.flatMap((x: any) => x?.reviews?.map((r: any) => r?.review_text)).filter(Boolean) ||
+        [];
+    } catch (e: any) {
+      // 3) Fallback to Google Place Details if Outscraper fails
+      const fb = await fallbackGooglePlaceReviews(placeId);
+      reviews = fb;
+      if (!reviews.length) throw e; // still throw original if we truly have nothing
+    }
+
+    if (reviews.length === 0) {
+      return NextResponse.json({ error: 'No reviews found for that business/timeframe.' }, { status: 404 });
+    }
+
+    // 4) AI analysis
+    const prompt = buildPrompt(reviews.map(r => `- ${r}`).join('\n'));
+    const ai = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${OPENAI_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.4,
+      }),
+    });
+    if (!ai.ok) {
+      const txt = await ai.text();
+      return NextResponse.json({ error: `AI error (${ai.status}): ${txt}` }, { status: 502 });
+    }
+    const aiData = await ai.json();
+    const text: string = aiData?.choices?.[0]?.message?.content || '';
+
+    const positives = parseList(text, 'Top 5 Positives', 'Top 5 Negatives', 5);
+    const negatives = parseList(text, 'Top 5 Negatives', 'Action Steps', 5);
+    const actions   = parseList(text, 'Action Steps', 'Summary', 8);
+    const summary   = parseList(text, 'Summary', undefined, 1)[0] || '';
+
+    return NextResponse.json({
+      resolved: { placeId, queryParam: `place_id:${placeId}` },
+      reviews,
+      analysis: { positives, negatives, actions, summary },
+    });
+  } catch (err: any) {
+    return NextResponse.json({ error: err?.message || 'Unexpected server error' }, { status: 500 });
   }
-
-  // Fallback to Google Places Details (returns up to 5 reviews)
-  if (!reviews.length && placeId && GOOGLE_MAPS_API_KEY) {
-    reviews = await getReviewsFromGooglePlaces(placeId, 5);
-  }
-
-  if (!reviews.length) {
-    return NextResponse.json(
-      { error: 'No reviews found for that business/timeframe.' },
-      { status: 404 }
-    );
-  }
-
-  const analysis = await runOpenAiAnalysis(reviews);
-
-  return NextResponse.json({
-    resolved: { placeId: placeId || null, queryParam },
-    reviews,
-    analysis,
-  });
 }

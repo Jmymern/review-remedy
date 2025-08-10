@@ -138,14 +138,30 @@ export default function AIAnalyzerPage() {
         />
 
         {/* live resolver status */}
-        <div className="text-sm">
+        <div className="text-sm space-y-1">
           {resolving && <p className="text-gray-500">Resolving place…</p>}
+
           {!resolving && resolved?.placeId && (
-            <p className="text-gray-700">
-              Resolved <span className="font-semibold">{resolved.name || 'place'}</span> —{' '}
-              <code className="bg-gray-100 px-1 py-0.5 rounded">place_id: {resolved.placeId}</code>
+            <>
+              <p className="text-gray-700">
+                Resolved <span className="font-semibold">{resolved.name || 'place'}</span> —{' '}
+                <code className="bg-gray-100 px-1 py-0.5 rounded">place_id: {resolved.placeId}</code>
+              </p>
+              {/* <-- tiny tweak: show exactly what we will query */}
+              <p className="text-xs text-gray-500">
+                We’ll query:&nbsp;
+                <code className="bg-gray-100 px-1 py-0.5 rounded">place_id:{resolved.placeId}</code> via
+                Outscraper (async).
+              </p>
+            </>
+          )}
+
+          {!resolving && !resolved?.placeId && input.trim() && !resolveErr && (
+            <p className="text-xs text-gray-500">
+              We’ll first resolve this to a <code>place_id</code> and then run the review pull.
             </p>
           )}
+
           {!resolving && resolveErr && (
             <p className="text-red-600">Couldn’t resolve: {resolveErr}</p>
           )}
