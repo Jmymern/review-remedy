@@ -1,143 +1,145 @@
-// File: app/api/create-report/route.ts
 import { NextResponse } from 'next/server';
 
-const OUTSCRAPER_API_KEY =
-  process.env.OUTSCRAPER_API_KEY || process.env.NEXT_PUBLIC_OUTSCRAPER_KEY;
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+export const dynamic = 'force-dynamic';
 
-// NOTE: Adjust endpoint/params to match your Outscraper account plan & docs.
-async function fetchReviews(placeUrl: string, days: number) {
-  if (!OUTSCRAPER_API_KEY) {
-    throw new Error('Outscraper API key missing on server.');
-  }
+type CreateReportBody = {
+  placeInput: string;      // Google Maps URL, name, or query text
+  days?: number;           // 30 | 60 | 90 | 365 (default 30)
+};
 
-  // Example endpoint (you may need to adapt to your exact Outscraper method/params)
-  const url = `https://api.app.outscraper.com/places/reviews?query=${encodeURIComponent(
-    placeUrl
-  )}&reviewsPeriod=${days}`;
+type OutscraperJob = {
+  results_location?: string;
+  status?: string;
+  data?: any;
+};
 
-  const r = await fetch(url, {
-    headers: {
-      'X-API-KEY': OUTSCRAPER_API_KEY,
-      Accept: 'application/json',
-    },
-  });
-
-  if (!r.ok) {
-    const t = await r.text();
-    throw new Error(`Outscraper error (${r.status}): ${t}`);
-  }
-
-  // Normalize: expect an array of review objects that include 'text'/'content'
-  const data = await r.json();
-
-  // Try to collect texts defensively
-  const texts: string[] = [];
-  const pushIf = (s: any) => {
-    if (typeof s === 'string' && s.trim().length > 0) texts.push(s.trim());
-  };
-
-  if (Array.isArray(data)) {
-    for (const item of data) {
-      if (Array.isArray(item?.reviews)) {
-        for (const rv of item.reviews) {
-          pushIf(rv?.text || rv?.content || rv?.review_text);
-        }
-      }
-      // some responses may just be raw reviews array
-      pushIf(item?.text || item?.content || item?.review_text);
-    }
-  } else if (data?.reviews && Array.isArray(data.reviews)) {
-    for (const rv of data.reviews) pushIf(rv?.text || rv?.content || rv?.review_text);
-  }
-
-  return texts.slice(0, 200); // cap to keep prompt small
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
-async function analyzeWithAI(reviews: string[]) {
-  if (!OPENAI_API_KEY) {
-    throw new Error('OpenAI API key missing on server.');
-  }
-
-  const prompt = `
-You are analyzing customer reviews. Given the raw reviews below, identify:
-- Top 5 recurring positive themes (bullet points).
-- Top 5 recurring negative themes (bullet points).
-- A concise action plan: 5–8 steps. Be specific, tactical, and non-generic.
-
-Return JSON with keys:
-{
-  "positives": string[],
-  "negatives": string[],
-  "suggestions": string[],
-  "summary": string
+function sanitizeReviews(raw: any): string[] {
+  if (!raw) return [];
+  const data = Array.isArray(raw?.data) ? raw.data : (Array.isArray(raw) ? raw : []);
+  const first = data?.[0];
+  const reviews = first?.reviews || [];
+  return reviews
+    .map((r: any) => r?.review_text || r?.text || '')
+    .filter((s: string) => !!s && s.trim().length > 0);
 }
 
-REVIEWS:
-${reviews.map((r, i) => `- ${r}`).join('\n')}
-`.trim();
-
-  const r = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: 'gpt-4o-mini',
-      messages: [
-        { role: 'system', content: 'You analyze customer reviews and return structured JSON.' },
-        { role: 'user', content: prompt },
-      ],
-      temperature: 0.2,
-    }),
-  });
-
-  if (!r.ok) {
-    const t = await r.text();
-    throw new Error(`OpenAI error (${r.status}): ${t}`);
-  }
-  const data = await r.json();
-
-  // Try to parse JSON out of the assistant message
-  const content: string = data.choices?.[0]?.message?.content || '{}';
-  let parsed: any;
+async function resolvePlaceId(placeInput: string): Promise<{ placeId?: string; name?: string; error?: string; }> {
   try {
-    parsed = JSON.parse(content);
-  } catch {
-    // Fallback: try to extract JSON block
-    const match = content.match(/\{[\s\S]*\}$/);
-    if (match) parsed = JSON.parse(match[0]);
+    const apiKey = process.env.GOOGLE_MAPS_API_KEY;
+    if (!apiKey) return { error: 'GOOGLE_MAPS_API_KEY is missing' };
+
+    const url = 'https://places.googleapis.com/v1/places:searchText';
+    const body = { textQuery: placeInput };
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Goog-Api-Key': apiKey,
+        'X-Goog-FieldMask': 'places.id,places.displayName',
+      },
+      body: JSON.stringify(body),
+      cache: 'no-store',
+    });
+
+    if (!resp.ok) {
+      const txt = await resp.text();
+      return { error: `Places API error ${resp.status}: ${txt}` };
+    }
+    const json = await resp.json();
+    const place = json?.places?.[0];
+    if (!place?.id) return { error: 'No place found for input' };
+    const name = place?.displayName?.text || '';
+    return { placeId: place.id.replace('places/', ''), name };
+  } catch (e: any) {
+    return { error: e?.message || 'resolvePlaceId failed' };
   }
-  if (!parsed) {
-    throw new Error('AI did not return valid JSON.');
+}
+
+async function fetchReviewsOutscraper(placeId: string, periodDays: number): Promise<any> {
+  const key = process.env.OUTSCRAPER_API_KEY;
+  if (!key) throw new Error('OUTSCRAPER_API_KEY is missing');
+
+  const submitUrl =
+    `https://api.app.outscraper.com/api/google_maps/reviews` +
+    `?place_id=${encodeURIComponent(placeId)}` +
+    `&reviews_limit=200&sort=newest&ignore_empty=1&language=en` +
+    `&reviews_period=${periodDays}d`;
+
+  const submit = await fetch(submitUrl, {
+    headers: { 'X-API-KEY': key },
+    cache: 'no-store',
+  });
+
+  if (!submit.ok) {
+    const txt = await submit.text();
+    throw new Error(`Outscraper submit failed (${submit.status}): ${txt}`);
   }
 
-  const positives = Array.isArray(parsed.positives) ? parsed.positives.slice(0, 5) : [];
-  const negatives = Array.isArray(parsed.negatives) ? parsed.negatives.slice(0, 5) : [];
-  const suggestions = Array.isArray(parsed.suggestions) ? parsed.suggestions : [];
-  const summary = typeof parsed.summary === 'string'
-    ? parsed.summary.slice(0, 1500)
-    : 'Summary unavailable';
+  const job: OutscraperJob = await submit.json();
+  const resultsLoc = job?.results_location;
+  if (!resultsLoc) {
+    if (job?.data) return job;
+    throw new Error('Outscraper missing results_location');
+  }
 
-  return { positives, negatives, suggestions, summary };
+  const start = Date.now();
+  while (Date.now() - start < 60000) {
+    const poll = await fetch(resultsLoc, {
+      headers: { 'X-API-KEY': key },
+      cache: 'no-store',
+    });
+
+    const text = await poll.text();
+    if (poll.ok) {
+      try {
+        const json = JSON.parse(text);
+        if (json?.status?.toLowerCase?.() === 'success' || Array.isArray(json)) {
+          return json;
+        }
+      } catch {}
+    }
+    await sleep(1500);
+  }
+
+  throw new Error('Outscraper poll timed out');
 }
 
 export async function POST(req: Request) {
   try {
-    const { placeUrl, days } = await req.json();
-    if (!placeUrl || !days) {
-      return NextResponse.json({ error: 'placeUrl and days are required.' }, { status: 400 });
+    const body = (await req.json()) as CreateReportBody;
+    const placeInput = (body?.placeInput || '').trim();
+    const periodDays = Number(body?.days || 30);
+
+    if (!placeInput) {
+      return NextResponse.json({ error: 'placeInput is required' }, { status: 400 });
+    }
+    if (![30, 60, 90, 365].includes(periodDays)) {
+      return NextResponse.json({ error: 'days must be one of 30, 60, 90, 365' }, { status: 400 });
     }
 
-    const reviews = await fetchReviews(String(placeUrl), Number(days));
-    if (!reviews || reviews.length === 0) {
-      return NextResponse.json({ error: 'No reviews found for the given input.' }, { status: 404 });
+    const resolved = await resolvePlaceId(placeInput);
+    if (resolved.error || !resolved.placeId) {
+      return NextResponse.json({ error: resolved.error || 'Failed to resolve place_id' }, { status: 400 });
     }
 
-    const analysis = await analyzeWithAI(reviews);
-    return NextResponse.json(analysis);
+    const raw = await fetchReviewsOutscraper(resolved.placeId, periodDays);
+    const reviews = sanitizeReviews(raw);
+
+    return NextResponse.json({
+      ok: true,
+      placeId: resolved.placeId,
+      placeName: resolved.name || '',
+      days: periodDays,
+      reviewCount: reviews.length,
+      reviews,
+      source: 'outscraper',
+      note: 'Resolved via Google Places; fetched via Outscraper job/poll',
+    });
   } catch (e: any) {
-    return NextResponse.json({ error: e?.message || 'Server error' }, { status: 500 });
+    return NextResponse.json({ error: e?.message || 'Unexpected error' }, { status: 500 });
   }
 }
