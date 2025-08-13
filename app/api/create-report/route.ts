@@ -1,18 +1,9 @@
+// app/api/create-report/route.ts
 import { NextResponse } from 'next/server';
-import OpenAI from 'openai';
 
 export const dynamic = 'force-dynamic';
 
-type CreateReportBody = {
-  placeInput: string;
-  days?: number;
-};
-
-type OutscraperJob = {
-  results_location?: string;
-  status?: string;
-  data?: any;
-};
+type CreateReportBody = { placeInput: string; days?: number };
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
@@ -28,49 +19,47 @@ function sanitizeReviews(raw: any): string[] {
     .filter((s: string) => !!s && s.trim().length > 0);
 }
 
-// --- STEP 1: Google Places API Lookup ---
-async function resolvePlaceId(placeInput: string): Promise<{ placeId?: string; name?: string; error?: string; }> {
+async function resolvePlaceId(placeInput: string): Promise<{ placeId?: string; name?: string; error?: string }> {
   try {
     const apiKey = process.env.GOOGLE_MAPS_API_KEY;
     if (!apiKey) return { error: 'GOOGLE_MAPS_API_KEY is missing' };
 
-    const urlMatch = placeInput.match(/https?:\/\/(www\.)?google\.[^/]+\/maps\/place\/([^/]+)/i);
-    if (urlMatch) {
-      placeInput = decodeURIComponent(urlMatch[2].replace(/\+/g, ' '));
-    }
+    console.log('[resolvePlaceId] Resolving:', placeInput);
 
-    const resp = await fetch('https://places.googleapis.com/v1/places:searchText', {
+    const url = 'https://places.googleapis.com/v1/places:searchText';
+    const body = { textQuery: placeInput };
+    const resp = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'X-Goog-Api-Key': apiKey,
         'X-Goog-FieldMask': 'places.id,places.displayName',
       },
-      body: JSON.stringify({ textQuery: placeInput }),
+      body: JSON.stringify(body),
       cache: 'no-store',
     });
 
     if (!resp.ok) {
       const txt = await resp.text();
+      console.error('[resolvePlaceId] Google API error:', txt);
       return { error: `Places API error ${resp.status}: ${txt}` };
     }
     const json = await resp.json();
-    const place = json?.places?.[0];
-    if (!place?.id) return { error: 'No place found for input' };
-
-    const name = place?.displayName?.text || '';
-    return { placeId: place.id.replace('places/', ''), name };
+    const p = json?.places?.[0];
+    if (!p?.id) return { error: 'No place found for input' };
+    const name = p?.displayName?.text || '';
+    return { placeId: String(p.id).replace('places/', ''), name };
   } catch (e: any) {
+    console.error('[resolvePlaceId] Exception:', e);
     return { error: e?.message || 'resolvePlaceId failed' };
   }
 }
 
-// --- STEP 2: Outscraper fetch by place_id ---
-async function fetchReviewsOutscraper(placeId: string, periodDays: number): Promise<any> {
+async function outscraperSubmitAndPoll(submitUrl: string) {
   const key = process.env.OUTSCRAPER_API_KEY;
   if (!key) throw new Error('OUTSCRAPER_API_KEY is missing');
 
-  const submitUrl = `https://api.app.outscraper.com/api/google_maps/reviews?place_id=${encodeURIComponent(placeId)}&reviews_limit=200&sort=newest&ignore_empty=1&language=en&reviews_period=${periodDays}d`;
+  console.log('[Outscraper] URL:', submitUrl);
 
   const submit = await fetch(submitUrl, {
     headers: { 'X-API-KEY': key },
@@ -79,147 +68,139 @@ async function fetchReviewsOutscraper(placeId: string, periodDays: number): Prom
 
   if (!submit.ok) {
     const txt = await submit.text();
-    throw new Error(`Outscraper place_id fetch failed (${submit.status}): ${txt}`);
+    console.error('[Outscraper] Submit error:', submit.status, txt);
+    throw new Error(`Outscraper submit failed (${submit.status}): ${txt}`);
   }
 
-  const job: OutscraperJob = await submit.json();
-  if (job?.data) return job;
+  const job = await submit.json();
+  console.log('[Outscraper] Job response:', JSON.stringify(job, null, 2));
 
+  if (job?.data) return job;
   const resultsLoc = job?.results_location;
   if (!resultsLoc) throw new Error('Outscraper missing results_location');
 
   const start = Date.now();
   while (Date.now() - start < 60000) {
-    const poll = await fetch(resultsLoc, {
-      headers: { 'X-API-KEY': key },
-      cache: 'no-store',
-    });
-    const text = await poll.text();
+    const poll = await fetch(resultsLoc, { headers: { 'X-API-KEY': key }, cache: 'no-store' });
+    const txt = await poll.text();
     if (poll.ok) {
       try {
-        const json = JSON.parse(text);
-        if (json?.status?.toLowerCase?.() === 'success' || Array.isArray(json)) {
-          return json;
-        }
-      } catch {}
+        const json = JSON.parse(txt);
+        console.log('[Outscraper] Poll response:', JSON.stringify(json, null, 2));
+        if (json?.status?.toLowerCase?.() === 'success' || Array.isArray(json)) return json;
+      } catch { /* keep polling */ }
     }
     await sleep(1500);
   }
-
   throw new Error('Outscraper poll timed out');
 }
 
-// --- STEP 3: Outscraper fetch by query ---
-async function fetchReviewsOutscraperByQuery(query: string, periodDays: number): Promise<any> {
-  const key = process.env.OUTSCRAPER_API_KEY;
-  if (!key) throw new Error('OUTSCRAPER_API_KEY is missing');
-
-  const submitUrl = `https://api.app.outscraper.com/api/google_maps/reviews?query=${encodeURIComponent(query)}&reviews_limit=200&sort=newest&ignore_empty=1&language=en&reviews_period=${periodDays}d`;
-
-  const submit = await fetch(submitUrl, {
-    headers: { 'X-API-KEY': key },
-    cache: 'no-store',
-  });
-
-  if (!submit.ok) {
-    const txt = await submit.text();
-    throw new Error(`Outscraper query fetch failed (${submit.status}): ${txt}`);
-  }
-
-  const job: OutscraperJob = await submit.json();
-  if (job?.data) return job;
-
-  const resultsLoc = job?.results_location;
-  if (!resultsLoc) throw new Error('Outscraper missing results_location');
-
-  const start = Date.now();
-  while (Date.now() - start < 60000) {
-    const poll = await fetch(resultsLoc, {
-      headers: { 'X-API-KEY': key },
-      cache: 'no-store',
-    });
-    const text = await poll.text();
-    if (poll.ok) {
-      try {
-        const json = JSON.parse(text);
-        if (json?.status?.toLowerCase?.() === 'success' || Array.isArray(json)) {
-          return json;
-        }
-      } catch {}
+async function fetchWithFallback(placeId: string | null, query: string, days: number) {
+  try {
+    if (placeId) {
+      return await outscraperSubmitAndPoll(
+        `https://api.app.outscraper.com/api/google_maps/reviews?place_id=${encodeURIComponent(placeId)}&reviews_limit=200&sort=newest&ignore_empty=1&language=en&reviews_period=${days}d`
+      );
     }
-    await sleep(1500);
+    // no placeId → query mode
+    return await outscraperSubmitAndPoll(
+      `https://api.app.outscraper.com/api/google_maps/reviews?query=${encodeURIComponent(query)}&reviews_limit=200&sort=newest&ignore_empty=1&language=en&reviews_period=${days}d`
+    );
+  } catch (err) {
+    // fallback: try query if placeId path failed
+    if (placeId) {
+      console.warn('[fetchWithFallback] placeId failed, retrying with query…', err);
+      return await outscraperSubmitAndPoll(
+        `https://api.app.outscraper.com/api/google_maps/reviews?query=${encodeURIComponent(query)}&reviews_limit=200&sort=newest&ignore_empty=1&language=en&reviews_period=${days}d`
+      );
+    }
+    throw err;
   }
-
-  throw new Error('Outscraper poll timed out');
 }
 
-// --- STEP 4: AI Analysis ---
 async function analyzeReviewsWithAI(reviews: string[]) {
-  const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) return null; // optional; don’t fail the request
+
+  console.log(`[AI] Sending ${reviews.length} reviews to OpenAI`);
+
   const prompt = `
-Analyze the following Google reviews. Identify:
-1. The top 5 recurring positive points (grouped by theme, short title + explanation).
-2. The top 5 recurring negative points (grouped by theme, short title + explanation).
-3. An actionable improvement plan to address the negatives.
-4. A plan to strengthen and leverage the positives.
+You are an expert business review analyst. From the following customer reviews, produce:
+
+1) Top 5 recurring POSITIVE themes (each: short title – explanation)
+2) Top 5 recurring NEGATIVE themes (each: short title – explanation)
+3) Actionable improvement plan for the negatives (bullets)
+4) Plan to keep and leverage the positives (bullets)
+
+Return either structured JSON with keys {positives[], negatives[], improve[], keep[]} OR clear sections with bullets.
 
 Reviews:
-${reviews.join('\n---\n')}
-  `;
+${reviews.join('\n')}
+`.trim();
 
-  const completion = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    messages: [{ role: "user", content: prompt }],
-    temperature: 0.4,
+  const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify({
+      model: 'gpt-4o-mini',
+      messages: [
+        { role: 'system', content: 'You are a concise, practical review analyst.' },
+        { role: 'user', content: prompt },
+      ],
+      temperature: 0.4,
+    }),
   });
 
-  return completion.choices[0].message?.content || '';
+  if (!resp.ok) {
+    const txt = await resp.text();
+    console.error('[AI] OpenAI error:', resp.status, txt);
+    return null;
+  }
+  const data = await resp.json();
+  const content = data?.choices?.[0]?.message?.content || '';
+  return content || null;
 }
 
-// --- MAIN HANDLER ---
+export async function GET() {
+  return NextResponse.json({ ok: false, error: 'Method Not Allowed' }, { status: 405 });
+}
+
 export async function POST(req: Request) {
   try {
     const body = (await req.json()) as CreateReportBody;
     const placeInput = (body?.placeInput || '').trim();
-    const periodDays = Number(body?.days || 30);
+    const days = Number(body?.days || 30);
 
-    if (!placeInput) {
-      return NextResponse.json({ error: 'placeInput is required' }, { status: 400 });
-    }
-    if (![30, 60, 90, 365].includes(periodDays)) {
+    console.log('[POST] Incoming:', { placeInput, days });
+
+    if (!placeInput) return NextResponse.json({ error: 'placeInput is required' }, { status: 400 });
+    if (![30, 60, 90, 365].includes(days)) {
       return NextResponse.json({ error: 'days must be one of 30, 60, 90, 365' }, { status: 400 });
     }
 
     const resolved = await resolvePlaceId(placeInput);
-    let raw;
-    try {
-      if (resolved.placeId) {
-        raw = await fetchReviewsOutscraper(resolved.placeId, periodDays);
-      } else {
-        raw = await fetchReviewsOutscraperByQuery(placeInput, periodDays);
-      }
-    } catch {
-      if (resolved.placeId) {
-        raw = await fetchReviewsOutscraperByQuery(placeInput, periodDays);
-      } else {
-        throw;
-      }
+
+    const raw = await fetchWithFallback(resolved.placeId || null, placeInput, days);
+    const reviews = sanitizeReviews(raw);
+
+    if (!reviews.length) {
+      return NextResponse.json({ error: 'No reviews found' }, { status: 404 });
     }
 
-    const reviews = sanitizeReviews(raw);
     const aiAnalysis = await analyzeReviewsWithAI(reviews);
 
     return NextResponse.json({
       ok: true,
       placeId: resolved.placeId || null,
       placeName: resolved.name || '',
-      days: periodDays,
+      days,
       reviewCount: reviews.length,
       reviews,
-      analysis: aiAnalysis,
-      source: resolved.placeId ? 'outscraper-place-id' : 'outscraper-query',
+      aiAnalysis, // string or null
+      source: resolved.placeId ? 'outscraper-placeId' : 'outscraper-query',
     });
   } catch (e: any) {
+    console.error('[POST] Fatal error:', e);
     return NextResponse.json({ error: e?.message || 'Unexpected error' }, { status: 500 });
   }
 }
