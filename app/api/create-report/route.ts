@@ -19,7 +19,9 @@ function sanitizeReviews(raw: any): string[] {
     .filter((s: string) => !!s && s.trim().length > 0);
 }
 
-async function resolvePlaceId(placeInput: string): Promise<{ placeId?: string; name?: string; error?: string }> {
+async function resolvePlaceId(
+  placeInput: string
+): Promise<{ placeId?: string; name?: string; error?: string }> {
   try {
     const apiKey = process.env.GOOGLE_MAPS_API_KEY;
     if (!apiKey) return { error: 'GOOGLE_MAPS_API_KEY is missing' };
@@ -41,7 +43,7 @@ async function resolvePlaceId(placeInput: string): Promise<{ placeId?: string; n
 
     if (!resp.ok) {
       const txt = await resp.text();
-      console.error('[resolvePlaceId] Google API error:', txt);
+      console.error('[resolvePlaceId] Google API error:', resp.status, txt);
       return { error: `Places API error ${resp.status}: ${txt}` };
     }
     const json = await resp.json();
@@ -55,7 +57,7 @@ async function resolvePlaceId(placeInput: string): Promise<{ placeId?: string; n
   }
 }
 
-async function outscraperSubmitAndPoll(submitUrl: string) {
+async function outscraperSubmitAndPoll(submitUrl: string): Promise<any> {
   const key = process.env.OUTSCRAPER_API_KEY;
   if (!key) throw new Error('OUTSCRAPER_API_KEY is missing');
 
@@ -76,78 +78,105 @@ async function outscraperSubmitAndPoll(submitUrl: string) {
   console.log('[Outscraper] Job response:', JSON.stringify(job, null, 2));
 
   if (job?.data) return job;
+
   const resultsLoc = job?.results_location;
   if (!resultsLoc) throw new Error('Outscraper missing results_location');
 
   const start = Date.now();
-  while (Date.now() - start < 60000) {
-    const poll = await fetch(resultsLoc, { headers: { 'X-API-KEY': key }, cache: 'no-store' });
+  while (Date.now() - start < 60_000) {
+    const poll = await fetch(resultsLoc, {
+      headers: { 'X-API-KEY': key },
+      cache: 'no-store',
+    });
     const txt = await poll.text();
     if (poll.ok) {
       try {
         const json = JSON.parse(txt);
         console.log('[Outscraper] Poll response:', JSON.stringify(json, null, 2));
-        if (json?.status?.toLowerCase?.() === 'success' || Array.isArray(json)) return json;
-      } catch { /* keep polling */ }
+        if (json?.status?.toLowerCase?.() === 'success' || Array.isArray(json)) {
+          return json;
+        }
+      } catch {
+        // keep polling
+      }
     }
     await sleep(1500);
   }
   throw new Error('Outscraper poll timed out');
 }
 
-async function fetchWithFallback(placeId: string | null, query: string, days: number) {
+async function fetchWithFallback(
+  placeId: string | null,
+  query: string,
+  days: number
+): Promise<any> {
   try {
     if (placeId) {
+      // First try by place_id
       return await outscraperSubmitAndPoll(
-        `https://api.app.outscraper.com/api/google_maps/reviews?place_id=${encodeURIComponent(placeId)}&reviews_limit=200&sort=newest&ignore_empty=1&language=en&reviews_period=${days}d`
+        `https://api.app.outscraper.com/api/google_maps/reviews?place_id=${encodeURIComponent(
+          placeId
+        )}&reviews_limit=200&sort=newest&ignore_empty=1&language=en&reviews_period=${days}d`
       );
     }
-    // no placeId → query mode
+    // No placeId from Google → query mode
     return await outscraperSubmitAndPoll(
-      `https://api.app.outscraper.com/api/google_maps/reviews?query=${encodeURIComponent(query)}&reviews_limit=200&sort=newest&ignore_empty=1&language=en&reviews_period=${days}d`
+      `https://api.app.outscraper.com/api/google_maps/reviews?query=${encodeURIComponent(
+        query
+      )}&reviews_limit=200&sort=newest&ignore_empty=1&language=en&reviews_period=${days}d`
     );
   } catch (err) {
-    // fallback: try query if placeId path failed
+    // If placeId path failed, retry with query
     if (placeId) {
-      console.warn('[fetchWithFallback] placeId failed, retrying with query…', err);
+      console.warn('[fetchWithFallback] placeId path failed, retrying with query…', err);
       return await outscraperSubmitAndPoll(
-        `https://api.app.outscraper.com/api/google_maps/reviews?query=${encodeURIComponent(query)}&reviews_limit=200&sort=newest&ignore_empty=1&language=en&reviews_period=${days}d`
+        `https://api.app.outscraper.com/api/google_maps/reviews?query=${encodeURIComponent(
+          query
+        )}&reviews_limit=200&sort=newest&ignore_empty=1&language=en&reviews_period=${days}d`
       );
     }
     throw err;
   }
 }
 
-async function analyzeReviewsWithAI(reviews: string[]) {
+async function analyzeReviewsWithAI(reviews: string[]): Promise<string | null> {
   const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) return null; // optional; don’t fail the request
+  if (!apiKey) {
+    console.warn('[AI] OPENAI_API_KEY not set; skipping analysis.');
+    return null; // optional — don’t fail the whole request
+  }
 
-  console.log(`[AI] Sending ${reviews.length} reviews to OpenAI`);
+  console.log(`[AI] Analyzing ${reviews.length} reviews with OpenAI`);
 
   const prompt = `
-You are an expert business review analyst. From the following customer reviews, produce:
+You are an expert business review analyst. From the following reviews, produce:
 
-1) Top 5 recurring POSITIVE themes (each: short title – explanation)
-2) Top 5 recurring NEGATIVE themes (each: short title – explanation)
-3) Actionable improvement plan for the negatives (bullets)
-4) Plan to keep and leverage the positives (bullets)
+1) Top 5 POSITIVE themes (short title – one-line explanation each)
+2) Top 5 NEGATIVE themes (short title – one-line explanation each)
+3) Improvement plan (bullets)
+4) Keep & Leverage plan (bullets)
 
-Return either structured JSON with keys {positives[], negatives[], improve[], keep[]} OR clear sections with bullets.
+Return either JSON:
+{"positives":[],"negatives":[],"improve":[],"keep":[]}
+OR clearly labeled sections with bullet points.
 
-Reviews:
+REVIEWS:
 ${reviews.join('\n')}
 `.trim();
 
   const resp = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+    },
     body: JSON.stringify({
       model: 'gpt-4o-mini',
+      temperature: 0.4,
       messages: [
         { role: 'system', content: 'You are a concise, practical review analyst.' },
         { role: 'user', content: prompt },
       ],
-      temperature: 0.4,
     }),
   });
 
@@ -156,8 +185,9 @@ ${reviews.join('\n')}
     console.error('[AI] OpenAI error:', resp.status, txt);
     return null;
   }
+
   const data = await resp.json();
-  const content = data?.choices?.[0]?.message?.content || '';
+  const content: string = data?.choices?.[0]?.message?.content || '';
   return content || null;
 }
 
@@ -173,13 +203,18 @@ export async function POST(req: Request) {
 
     console.log('[POST] Incoming:', { placeInput, days });
 
-    if (!placeInput) return NextResponse.json({ error: 'placeInput is required' }, { status: 400 });
+    if (!placeInput) {
+      return NextResponse.json({ error: 'placeInput is required' }, { status: 400 });
+    }
     if (![30, 60, 90, 365].includes(days)) {
-      return NextResponse.json({ error: 'days must be one of 30, 60, 90, 365' }, { status: 400 });
+      return NextResponse.json(
+        { error: 'days must be one of 30, 60, 90, 365' },
+        { status: 400 }
+      );
     }
 
     const resolved = await resolvePlaceId(placeInput);
-
+    // Proceed even if resolve returned an error — we’ll use query fallback below.
     const raw = await fetchWithFallback(resolved.placeId || null, placeInput, days);
     const reviews = sanitizeReviews(raw);
 
@@ -196,11 +231,14 @@ export async function POST(req: Request) {
       days,
       reviewCount: reviews.length,
       reviews,
-      aiAnalysis, // string or null
+      aiAnalysis, // may be null if OPENAI_API_KEY missing
       source: resolved.placeId ? 'outscraper-placeId' : 'outscraper-query',
     });
   } catch (e: any) {
     console.error('[POST] Fatal error:', e);
-    return NextResponse.json({ error: e?.message || 'Unexpected error' }, { status: 500 });
+    return NextResponse.json(
+      { error: e?.message || 'Unexpected error' },
+      { status: 500 }
+    );
   }
 }
